@@ -9,6 +9,7 @@ import json
 from datetime import date
 
 import pytest
+import click
 from click.testing import CliRunner
 
 import time_entry as te
@@ -206,9 +207,17 @@ def test_load_config_writes_template_when_missing(tmp_path):
 def test_load_config_rejects_bad_percentages(tmp_path):
     path = tmp_path / "bad.toml"
     path.write_text(GOOD_TOML.replace("pct = 50", "pct = 40", 1))
-    with pytest.raises(SystemExit) as excinfo:
+    with pytest.raises(click.ClickException) as excinfo:
         te.load_config(path)
-    assert "90" in str(excinfo.value.code)
+    assert "90" in str(excinfo.value)
+
+
+def test_load_config_reports_template_parse_errors(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text(te.TEMPLATE_TOML)
+
+    with pytest.raises(click.ClickException, match="Replace all template placeholders"):
+        te.load_config(path)
 
 
 def test_records_round_trip(tmp_path, config):
@@ -301,7 +310,7 @@ def test_help(xdg):
     result = CliRunner().invoke(te.main, ["--help"])
     assert result.exit_code == 0
     assert "Monthly time allocator" in result.output
-    for command in ("plan", "show", "status", "init", "login", "get", "diff", "apply"):
+    for command in ("plan", "show", "status", "init", "install-browser", "login", "get", "diff", "apply"):
         assert command in result.output
 
 
@@ -319,6 +328,30 @@ def test_init_writes_config(tmp_path, xdg):
     result = runner.invoke(te.main, ["--config", str(path), "init"])
     assert result.exit_code != 0
     assert path.read_text() == GOOD_TOML
+
+
+def test_cli_reports_invalid_config_without_traceback(tmp_path, xdg):
+    path = tmp_path / "config.toml"
+    path.write_text(te.TEMPLATE_TOML)
+
+    result = CliRunner().invoke(te.main, ["--config", str(path), "plan"])
+    assert result.exit_code != 0
+    assert "Replace all template placeholders" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_install_browser_uses_bundled_playwright(monkeypatch):
+    calls = []
+
+    def fake_run(command, check):
+        calls.append((command, check))
+        return te.subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(te.subprocess, "run", fake_run)
+    result = CliRunner().invoke(te.main, ["install-browser"])
+
+    assert result.exit_code == 0
+    assert calls == [([te.sys.executable, "-m", "playwright", "install", "chromium"], False)]
 
 
 def test_plan_show_status(tmp_path, xdg):

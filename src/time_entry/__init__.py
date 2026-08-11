@@ -28,6 +28,7 @@ import calendar
 import json
 import os
 import re
+import subprocess
 import sys
 import tomllib
 from dataclasses import dataclass, field
@@ -167,19 +168,42 @@ def load_config(path: Path) -> "Config":
         path.write_text(TEMPLATE_TOML)
         print(f"Created template config at {path}\nEdit it to set your projects and days off, then re-run.", file=sys.stderr)
         sys.exit(0)
-    with path.open("rb") as fh:
-        raw = tomllib.load(fh)
-    projects = [Project(code=str(p["code"]), pct=float(p["pct"]), desc=str(p["desc"])) for p in raw["projects"]]
+    try:
+        with path.open("rb") as fh:
+            raw = tomllib.load(fh)
+    except tomllib.TOMLDecodeError as exc:
+        raise click.ClickException(
+            f"Invalid configuration in {path}: {exc}. "
+            "Replace all template placeholders (such as 'XX') and try again."
+        ) from exc
+
+    try:
+        projects = [
+            Project(code=str(p["code"]), pct=float(p["pct"]), desc=str(p["desc"]))
+            for p in raw["projects"]
+        ]
+        fiscal_year = int(raw["fiscal_year"])
+        days_off = {date.fromisoformat(d) for d in raw.get("days_off", [])}
+    except (KeyError, TypeError, ValueError) as exc:
+        raise click.ClickException(
+            f"Invalid configuration in {path}: {exc}. "
+            "Check fiscal_year, days_off, and each project entry."
+        ) from exc
+
+    if not projects:
+        raise click.ClickException(f"Invalid configuration in {path}: add at least one project.")
     total_pct = sum(p.pct for p in projects)
     if abs(total_pct - 100) > 0.01:
-        sys.exit(f"Error: project percentages sum to {total_pct:.1f}, expected 100.")
-    days_off = {date.fromisoformat(d) for d in raw.get("days_off", [])}
+        raise click.ClickException(
+            f"Invalid configuration in {path}: project percentages sum to "
+            f"{total_pct:.1f}, expected 100."
+        )
     wd_raw = raw.get("workday", {})
     workday = WorkdayConfig(
         home_url=wd_raw.get("home_url", WorkdayConfig.home_url),
         time_entry_url=wd_raw.get("time_entry_url", WorkdayConfig.time_entry_url),
     )
-    return Config(fiscal_year=int(raw["fiscal_year"]), projects=projects, days_off=days_off, workday=workday)
+    return Config(fiscal_year=fiscal_year, projects=projects, days_off=days_off, workday=workday)
 
 
 @dataclass
@@ -894,7 +918,7 @@ async def _do_login(home_url: str, auth_state_path: Path) -> None:
             browser = await pw.chromium.launch(headless=False)
         except Exception as e:
             print(f"Could not launch Chromium: {e}", file=sys.stderr)
-            print("Make sure it is installed:  playwright install chromium", file=sys.stderr)
+            print("Install the matching browser:  time-entry install-browser", file=sys.stderr)
             return
         context = await browser.new_context()
         page = await context.new_page()
@@ -923,7 +947,7 @@ async def _do_get(
             browser = await pw.chromium.launch(headless=False)
         except Exception as e:
             print(f"Could not launch Chromium: {e}", file=sys.stderr)
-            print("Make sure it is installed:  playwright install chromium", file=sys.stderr)
+            print("Install the matching browser:  time-entry install-browser", file=sys.stderr)
             return []
         context = await browser.new_context(storage_state=str(auth_state_path))
         page = await context.new_page()
@@ -1225,7 +1249,7 @@ async def _do_apply(
             browser = await pw.chromium.launch(headless=False)
         except Exception as e:
             print(f"Could not launch Chromium: {e}", file=sys.stderr)
-            print("Make sure it is installed:  playwright install chromium", file=sys.stderr)
+            print("Install the matching browser:  time-entry install-browser", file=sys.stderr)
             return
         context = await browser.new_context(storage_state=str(auth_state_path))
         page = await context.new_page()
@@ -1342,6 +1366,18 @@ def cmd_show(month_str: str | None, config: Config, records: Records) -> None:
 
 def cmd_status(config: Config, records: Records) -> None:
     display_status(config, records)
+
+
+def cmd_install_browser() -> None:
+    """Install Chromium using the exact Playwright version time-entry uses."""
+    command = [sys.executable, "-m", "playwright", "install", "chromium"]
+    print("Installing Chromium for time-entry...")
+    result = subprocess.run(command, check=False)
+    if result.returncode:
+        raise click.ClickException(
+            "Chromium installation failed. Check your network connection and retry "
+            "'time-entry install-browser'."
+        )
 
 
 def cmd_login(auth_state: Path, config: Config) -> None:
@@ -1515,6 +1551,12 @@ def status(ctx):
 def init_cmd(ctx):
     """Write a template config file."""
     cmd_init(ctx.obj["config_path"])
+
+
+@main.command("install-browser")
+def install_browser():
+    """Install the Chromium version required by time-entry."""
+    cmd_install_browser()
 
 
 @main.command()
