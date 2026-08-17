@@ -25,8 +25,8 @@ uv tool install -e .
 uv run pytest
 #+end_example
 
-The =login=, =get=, =diff=, =apply= and =submit= commands drive a real browser via
-Playwright.  Its Chromium must be installed once:
+The =login=, =get=, =diff=, =apply=, =submit= and =workflow= commands drive a
+real browser via Playwright.  Its Chromium must be installed once:
 
 #+begin_example
 time-entry install-browser
@@ -78,9 +78,11 @@ time-entry --headless workflow  # only login opens a visible window
 This runs =login=, =get=, =plan= and =diff=, then asks =Do you want to apply
 this?= and =Do you want to submit this?= before those destructive steps.  Both
 prompts default to no.  The optional =YYYY-MM= argument selects a month.
+=--dry-run= is not supported by =workflow=; use the individual commands for a
+partial or preview run.
 
-Each command takes an optional =YYYY-MM= argument and defaults to the current
-month.  Also useful:
+Month-oriented commands take an optional =YYYY-MM= argument and default to the
+current month.  Also useful:
 
 #+begin_example
 time-entry init          # write a template config
@@ -107,13 +109,15 @@ which is where existing state may be found:
   by =apply=.
 - =workday_*.html= :: page captures for debugging selectors, safe to delete.
 
-All four paths can be overridden with top-level options, see =time-entry --help=.
+The config, records and auth-state paths can be overridden with top-level
+options.  Diff JSON and debug captures always use the state directory; see
+=time-entry --help=.
 
 * Development notes
 
-[[file:docs/time-entry.md]] records the confirmed Workday DOM selectors, the
-quirks of driving its SPA and a roadmap for replacing the slow per-day entry
-dialog with Workday's bulk weekly flows.
+[[file:docs/time-entry.md]] records the confirmed per-day Workday DOM selectors,
+the unverified submission selectors, SPA quirks and a roadmap for replacing the
+slow per-day entry dialog with Workday's bulk weekly flows.
 
 * Cautions and caveats
 
@@ -122,6 +126,10 @@ confirmed against BNL's tenant and drift over time.  To be most cautious, run
 =apply= without =--yes= first, re-run =diff= after =apply --yes= to confirm what
 landed, and only then run =submit --yes=.  Submission is never performed by
 =apply=.
+
+The new =submit=, =workflow= and headless paths have automated test coverage
+but have not yet been exercised against live Workday.  Test them headed first,
+verify Workday's resulting status manually and expect selector adjustments.
 
 The current policy fills in the month using 8 hour per day atoms so that it is accurate on average compared to the configured %FTE per project.  The current policy has no facility to make individual hours/days record what effort was actually done those specific hours/days.  That is, the configured %FTE per project is taken as ground truth for the month as a whole.
 

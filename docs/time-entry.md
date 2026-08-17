@@ -4,6 +4,10 @@ Status: the per-day `apply` flow **works end to end** (a full month was entered
 successfully). It is correct but **slow**: each day is one multi-step Workday
 dialog with mandatory settle delays, so ~21 days takes a long time.
 
+The newer `submit`, `workflow` and headless paths have automated coverage but
+**have not been tested against live Workday**. In particular, the Review and
+Submit selectors are candidates until confirmed against the tenant.
+
 This document is the prompt for the **next phase**: replacing the one-day-at-a-time
 entry with one of Workday's **bulk weekly** entry flows. It also records the
 hard-won DOM knowledge so we don't rediscover it.
@@ -12,18 +16,20 @@ hard-won DOM knowledge so we don't rediscover it.
 
 ## 1. What the script does today
 
-This uses playwright to let Python run a browser as a puppet.  To get started you will need:
+This uses Playwright to let Python drive a browser. Install its matching
+Chromium build once:
 ```
-uvx playwright install
+time-entry install-browser
 ```
 
 The main workflow is:
 
 1. login
-2. plan
-3. diff
-4. apply
-5. submit
+2. get
+3. plan
+4. diff
+5. apply
+6. submit
 
 
 `time-entry` (a `uv run` single-file script, dep: `playwright`) is a fiscal-year
@@ -40,14 +46,17 @@ project-time allocator + Workday automator. Commands:
 - `apply [YYYY-MM] [--yes] [--inspect]` — drive Workday to enter each change.
   Dry-run unless `--yes`. `--inspect` pauses on the **first** day and dumps panel
   HTML for selector debugging. This command does not submit the timecard.
-- `submit [YYYY-MM] [--yes]` — run Workday's Review → Submit flow. Dry-run
-  unless `--yes`; keep this separate from `apply` so submission is explicit.
+- `submit [YYYY-MM] [--yes]` — run the unverified Workday Review → Submit flow.
+  Dry-run unless `--yes`; keep this separate from `apply` so submission is
+  explicit.
 - `workflow [YYYY-MM]` — run `login`, `get`, `plan` and `diff`, then prompt
-  separately before applying and submitting. Both confirmations default to no.
+  separately before applying and submitting. Both confirmations default to no;
+  the global `--dry-run` option is rejected for this combined command.
 
 The top-level `--headless/--headed` option controls Chromium for `get`, `diff`,
 `apply` and `submit`; headed is the default. `login` is always headed, and
 `apply --inspect` rejects headless mode because it requires visual interaction.
+Headless execution has not yet been validated against live Workday.
 
 Config: `time-entry.toml` (projects = code/pct/desc, days_off, workday URLs).
 Records: `time-entry.json`. Auth: `time-entry-auth.json`.
@@ -57,9 +66,10 @@ The time-entry calendar task URL: `https://www.myworkday.com/bnl/d/task/2998$108
 ### Key entry points in the code
 - `cmd_apply` → `_do_apply` (loops over changes) → `_enter_time_for_day` (the
   per-day dialog driver — this is what bulk entry would replace).
-- `cmd_submit` → `_do_submit` navigates to the month, clicks Review, waits for
-  the review state, and clicks Submit.
-- `_DIALOG_SELECTORS` dict holds all the confirmed selectors.
+- `cmd_submit` → `_do_submit` navigates to the month, then attempts the
+  unverified Review → Submit sequence.
+- `_DIALOG_SELECTORS` holds confirmed per-day selectors plus candidate
+  Review/Submit selectors that still require live validation.
 - `_navigate_to_month` walks prev/next-month buttons to the target month.
 
 ---
@@ -187,6 +197,7 @@ These are tenant- and version-sensitive (one flipped mid-session — see §5).
 - `workday_dialog_dropdown.html` — after typing the code (the prompt popup).
 - `workday_dialog_filled.html` — after Time Type + Hours, before OK.
 - `workday_debug_YYYY_MM.html` — full page saved at end of `get`/`apply`.
+- `workday_submit_debug_YYYY_MM.html` — page saved after a submission attempt.
 
 Then parse with quick Python: count/locate `data-automation-id`s, list
 `formLabel` texts, list `<input>`/`<button>` tags, check visibility hints. This
@@ -213,7 +224,7 @@ DOM at each step, then script it.**
 ---
 
 ## 8. Files
-- `time-entry` — the script.
+- `src/time_entry/__init__.py` — implementation and Click entry point.
 - `time-entry.toml` — config (projects, days_off, URLs).
 - `time-entry.json` — saved plans/records.
 - `time-entry-auth.json` — Playwright storage_state (from `login`).
