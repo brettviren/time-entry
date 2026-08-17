@@ -43,6 +43,10 @@ project-time allocator + Workday automator. Commands:
 - `submit [YYYY-MM] [--yes]` — run Workday's Review → Submit flow. Dry-run
   unless `--yes`; keep this separate from `apply` so submission is explicit.
 
+The top-level `--headless/--headed` option controls Chromium for `get`, `diff`,
+`apply` and `submit`; headed is the default. `login` is always headed, and
+`apply --inspect` rejects headless mode because it requires visual interaction.
+
 Config: `time-entry.toml` (projects = code/pct/desc, days_off, workday URLs).
 Records: `time-entry.json`. Auth: `time-entry-auth.json`.
 

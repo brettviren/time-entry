@@ -56,6 +56,18 @@ time-entry submit        # dry-run: show which month's timecard would submit
 time-entry submit --yes  # review, then submit the timecard
 #+end_example
 
+Browser automation is visible by default.  Put the top-level =--headless=
+option before =get=, =diff=, =apply= or =submit= to run Chromium without a
+window, for example:
+
+#+begin_example
+time-entry --headless get
+time-entry --headless apply --yes
+#+end_example
+
+Use =--headed= (or omit either option) when debugging.  =login= always opens a
+visible browser for SSO/2FA, and =apply --inspect= requires =--headed=.
+
 Each command takes an optional =YYYY-MM= argument and defaults to the current
 month.  Also useful:
 

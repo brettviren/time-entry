@@ -940,11 +940,12 @@ async def _do_get(
     year: int,
     month: int,
     debug_html_path: Path,
+    headless: bool = False,
 ) -> list[WorkdayDayEntry]:
     from playwright.async_api import async_playwright
     async with async_playwright() as pw:
         try:
-            browser = await pw.chromium.launch(headless=False)
+            browser = await pw.chromium.launch(headless=headless)
         except Exception as e:
             print(f"Could not launch Chromium: {e}", file=sys.stderr)
             print("Install the matching browser:  time-entry install-browser", file=sys.stderr)
@@ -1247,11 +1248,12 @@ async def _do_apply(
     dry_run: bool,
     inspect: bool,
     debug_html_path: Path,
+    headless: bool = False,
 ) -> None:
     from playwright.async_api import async_playwright
     async with async_playwright() as pw:
         try:
-            browser = await pw.chromium.launch(headless=False)
+            browser = await pw.chromium.launch(headless=headless)
         except Exception as e:
             print(f"Could not launch Chromium: {e}", file=sys.stderr)
             print("Install the matching browser:  time-entry install-browser", file=sys.stderr)
@@ -1308,13 +1310,14 @@ async def _do_submit(
     year: int,
     month: int,
     debug_html_path: Path,
+    headless: bool = False,
 ) -> None:
     """Open a month's timecard and perform Workday's Review -> Submit flow."""
     from playwright.async_api import async_playwright
 
     async with async_playwright() as pw:
         try:
-            browser = await pw.chromium.launch(headless=False)
+            browser = await pw.chromium.launch(headless=headless)
         except Exception as e:
             raise click.ClickException(
                 f"Could not launch Chromium: {e}. "
@@ -1461,7 +1464,13 @@ def cmd_login(auth_state: Path, config: Config) -> None:
     asyncio.run(_do_login(config.workday.home_url, auth_state))
 
 
-def cmd_get(month_str: str | None, auth_state: Path, config: Config, records: Records) -> None:
+def cmd_get(
+    month_str: str | None,
+    auth_state: Path,
+    config: Config,
+    records: Records,
+    headless: bool = False,
+) -> None:
     if not auth_state.exists():
         sys.exit(
             f"Auth state not found at {auth_state}.\n"
@@ -1469,12 +1478,25 @@ def cmd_get(month_str: str | None, auth_state: Path, config: Config, records: Re
         )
     year, month = parse_month(month_str, date.today())
     debug_path = _xdg_dir("state") / f"workday_debug_{year:04d}_{month:02d}.html"
-    entries = asyncio.run(_do_get(config.workday.time_entry_url, auth_state, year, month, debug_path))
+    entries = asyncio.run(_do_get(
+        config.workday.time_entry_url,
+        auth_state,
+        year,
+        month,
+        debug_path,
+        headless=headless,
+    ))
     record = next((m for m in records.months if m.year == year and m.month == month), None)
     display_workday_get(year, month, entries, config, record)
 
 
-def cmd_diff(month_str: str | None, auth_state: Path, config: Config, records: Records) -> None:
+def cmd_diff(
+    month_str: str | None,
+    auth_state: Path,
+    config: Config,
+    records: Records,
+    headless: bool = False,
+) -> None:
     if not auth_state.exists():
         sys.exit(
             f"Auth state not found at {auth_state}.\n"
@@ -1489,7 +1511,14 @@ def cmd_diff(month_str: str | None, auth_state: Path, config: Config, records: R
         )
 
     debug_path = _xdg_dir("state") / f"workday_debug_{year:04d}_{month:02d}.html"
-    entries = asyncio.run(_do_get(config.workday.time_entry_url, auth_state, year, month, debug_path))
+    entries = asyncio.run(_do_get(
+        config.workday.time_entry_url,
+        auth_state,
+        year,
+        month,
+        debug_path,
+        headless=headless,
+    ))
 
     plan = _plan_by_date(record, config)
     changes, matched, skipped = _compute_diff(entries, plan)
@@ -1498,13 +1527,24 @@ def cmd_diff(month_str: str | None, auth_state: Path, config: Config, records: R
     display_diff(year, month, changes, matched, skipped, diff_path)
 
 
-def cmd_apply(month_str: str | None, auth_state: Path, yes: bool, inspect: bool, config: Config) -> None:
+def cmd_apply(
+    month_str: str | None,
+    auth_state: Path,
+    yes: bool,
+    inspect: bool,
+    config: Config,
+    headless: bool = False,
+) -> None:
     if not auth_state.exists():
         sys.exit(
             f"Auth state not found at {auth_state}.\n"
             "Run 'time-entry login' first to save your session."
         )
     year, month = parse_month(month_str, date.today())
+    if inspect and headless:
+        raise click.UsageError(
+            "--inspect requires a visible browser; use --headed instead of --headless."
+        )
 
     # Load changes from the diff JSON produced by 'diff'
     diff_path = _xdg_dir("state") / f"time-entry-diff-{year:04d}-{month:02d}.json"
@@ -1546,10 +1586,17 @@ def cmd_apply(month_str: str | None, auth_state: Path, yes: bool, inspect: bool,
         dry_run=dry_run,
         inspect=inspect,
         debug_html_path=debug_path,
+        headless=headless,
     ))
 
 
-def cmd_submit(month_str: str | None, auth_state: Path, yes: bool, config: Config) -> None:
+def cmd_submit(
+    month_str: str | None,
+    auth_state: Path,
+    yes: bool,
+    config: Config,
+    headless: bool = False,
+) -> None:
     if not auth_state.exists():
         sys.exit(
             f"Auth state not found at {auth_state}.\n"
@@ -1571,6 +1618,7 @@ def cmd_submit(month_str: str | None, auth_state: Path, yes: bool, config: Confi
         year,
         month,
         debug_path,
+        headless=headless,
     ))
 
 
@@ -1586,11 +1634,13 @@ def cmd_submit(month_str: str | None, auth_state: Path, yes: bool, config: Confi
               default=lambda: _xdg_dir("state") / "time-entry.json",
               help="Records JSON (default: ~/.local/state/time-entry/time-entry.json)")
 @click.option("--dry-run", is_flag=True, help="Compute but do not save")
+@click.option("--headless/--headed", default=False,
+              help="Hide/show Chromium after login (default: headed)")
 @click.option("--auth-state", "auth_state", type=click.Path(path_type=Path),
               default=lambda: _xdg_dir("state") / "time-entry-auth.json",
               help="Playwright auth-state JSON (default: ~/.local/state/time-entry/time-entry-auth.json)")
 @click.pass_context
-def main(ctx, config_path, records_path, dry_run, auth_state):
+def main(ctx, config_path, records_path, dry_run, headless, auth_state):
     """
     Monthly time allocator for fiscal-year project reporting.
 
@@ -1613,6 +1663,7 @@ def main(ctx, config_path, records_path, dry_run, auth_state):
         config_path=config_path,
         records_path=records_path,
         dry_run=dry_run,
+        headless=headless,
         auth_state=auth_state,
     )
 
@@ -1677,7 +1728,7 @@ def login(ctx):
 def get(ctx, month):
     """Read current Workday time entries for a month."""
     config, records = _ctx_load(ctx)
-    cmd_get(month, ctx.obj["auth_state"], config, records)
+    cmd_get(month, ctx.obj["auth_state"], config, records, headless=ctx.obj["headless"])
 
 
 @main.command()
@@ -1686,7 +1737,7 @@ def get(ctx, month):
 def diff(ctx, month):
     """Compare Workday entries against plan and save a diff JSON."""
     config, records = _ctx_load(ctx)
-    cmd_diff(month, ctx.obj["auth_state"], config, records)
+    cmd_diff(month, ctx.obj["auth_state"], config, records, headless=ctx.obj["headless"])
 
 
 @main.command()
@@ -1698,7 +1749,14 @@ def diff(ctx, month):
 def apply(ctx, month, yes, inspect):
     """Apply diff JSON changes to Workday without submitting."""
     config, _records = _ctx_load(ctx)
-    cmd_apply(month, ctx.obj["auth_state"], yes, inspect, config)
+    cmd_apply(
+        month,
+        ctx.obj["auth_state"],
+        yes,
+        inspect,
+        config,
+        headless=ctx.obj["headless"],
+    )
 
 
 @main.command()
@@ -1708,7 +1766,7 @@ def apply(ctx, month, yes, inspect):
 def submit(ctx, month, yes):
     """Review and submit a Workday timecard."""
     config, _records = _ctx_load(ctx)
-    cmd_submit(month, ctx.obj["auth_state"], yes, config)
+    cmd_submit(month, ctx.obj["auth_state"], yes, config, headless=ctx.obj["headless"])
 
 
 if __name__ == "__main__":

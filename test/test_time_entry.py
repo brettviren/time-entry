@@ -322,6 +322,40 @@ def test_save_and_submit_selectors_are_separate():
     assert "submit" in te._DIALOG_SELECTORS["submit_button"]
 
 
+def test_browser_mode_defaults_to_headed_and_can_be_switched(tmp_path, xdg, monkeypatch):
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(GOOD_TOML)
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text("{}")
+    modes = []
+
+    def fake_cmd_get(_month, _auth, _config, _records, headless=False):
+        modes.append(headless)
+
+    monkeypatch.setattr(te, "cmd_get", fake_cmd_get)
+    runner = CliRunner()
+    base = ["--config", str(config_path), "--auth-state", str(auth_path)]
+
+    assert runner.invoke(te.main, [*base, "get", "2026-07"]).exit_code == 0
+    assert runner.invoke(te.main, [*base, "--headless", "get", "2026-07"]).exit_code == 0
+    assert runner.invoke(te.main, [*base, "--headed", "get", "2026-07"]).exit_code == 0
+    assert modes == [False, True, False]
+
+
+def test_inspect_rejects_headless_browser(tmp_path, xdg):
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(GOOD_TOML)
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text("{}")
+    result = CliRunner().invoke(te.main, [
+        "--config", str(config_path), "--auth-state", str(auth_path),
+        "--headless", "apply", "2026-07", "--inspect",
+    ])
+
+    assert result.exit_code != 0
+    assert "--inspect requires a visible browser" in result.output
+
+
 def test_review_happens_before_submit():
     events = []
 
@@ -498,8 +532,8 @@ def test_submit_yes_runs_review_submit_flow(tmp_path, xdg, monkeypatch):
     auth_path.write_text("{}")
     calls = []
 
-    async def fake_do_submit(*args):
-        calls.append(args)
+    async def fake_do_submit(*args, **kwargs):
+        calls.append((args, kwargs))
 
     monkeypatch.setattr(te, "_do_submit", fake_do_submit)
     result = CliRunner().invoke(te.main, [
@@ -509,4 +543,5 @@ def test_submit_yes_runs_review_submit_flow(tmp_path, xdg, monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert len(calls) == 1
-    assert calls[0][:4] == ("https://example.com/time", auth_path, 2026, 7)
+    assert calls[0][0][:4] == ("https://example.com/time", auth_path, 2026, 7)
+    assert calls[0][1] == {"headless": False}
