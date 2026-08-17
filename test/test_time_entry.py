@@ -312,6 +312,7 @@ def test_help(xdg):
     assert "Monthly time allocator" in result.output
     for command in (
         "plan", "show", "status", "init", "install-browser", "login", "get", "diff", "apply", "submit",
+        "workflow",
     ):
         assert command in result.output
 
@@ -354,6 +355,77 @@ def test_inspect_rejects_headless_browser(tmp_path, xdg):
 
     assert result.exit_code != 0
     assert "--inspect requires a visible browser" in result.output
+
+
+def test_workflow_cli_threads_headless_and_optional_month(tmp_path, xdg, monkeypatch):
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(GOOD_TOML)
+    calls = []
+
+    def fake_cmd_workflow(*args, **kwargs):
+        calls.append((args, kwargs))
+
+    monkeypatch.setattr(te, "cmd_workflow", fake_cmd_workflow)
+    result = CliRunner().invoke(te.main, [
+        "--config", str(config_path), "--records", str(tmp_path / "records.json"),
+        "--auth-state", str(tmp_path / "auth.json"), "--headless", "workflow",
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert calls[0][0][0] is None
+    assert calls[0][1] == {"headless": True}
+
+    result = CliRunner().invoke(te.main, [
+        "--config", str(config_path), "--dry-run", "workflow",
+    ])
+    assert result.exit_code != 0
+    assert "--dry-run is not supported by workflow" in result.output
+
+
+@pytest.mark.parametrize(
+    ("answers", "expected_tail"),
+    [
+        ([False, False], ["apply skipped", "submit skipped"]),
+        ([True, True], ["apply", "submit"]),
+    ],
+)
+def test_workflow_confirmation_gates(tmp_path, config, monkeypatch, answers, expected_tail):
+    events = []
+    prompts = []
+    records = te.Records(fiscal_year=2026)
+
+    monkeypatch.setattr(te, "cmd_login", lambda *_args, **_kwargs: events.append("login"))
+    monkeypatch.setattr(te, "cmd_get", lambda *_args, **_kwargs: events.append("get"))
+    monkeypatch.setattr(te, "cmd_plan", lambda *_args, **_kwargs: events.append("plan"))
+    monkeypatch.setattr(te, "cmd_diff", lambda *_args, **_kwargs: events.append("diff"))
+    monkeypatch.setattr(te, "cmd_apply", lambda *_args, **_kwargs: events.append("apply"))
+    monkeypatch.setattr(te, "cmd_submit", lambda *_args, **_kwargs: events.append("submit"))
+
+    responses = iter(answers)
+
+    def fake_confirm(prompt, default):
+        prompts.append((prompt, default))
+        answer = next(responses)
+        events.append("apply skipped" if prompt.startswith("Do you want to apply") and not answer
+                      else "submit skipped" if not answer else "confirmed")
+        return answer
+
+    monkeypatch.setattr(te.click, "confirm", fake_confirm)
+    te.cmd_workflow(
+        "2026-07",
+        tmp_path / "auth.json",
+        config,
+        records,
+        tmp_path / "records.json",
+        headless=True,
+    )
+
+    assert events[:4] == ["login", "get", "plan", "diff"]
+    assert [event for event in events if event in expected_tail] == expected_tail
+    assert prompts == [
+        ("Do you want to apply this?", False),
+        ("Do you want to submit this?", False),
+    ]
 
 
 def test_review_happens_before_submit():

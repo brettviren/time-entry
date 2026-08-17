@@ -68,6 +68,17 @@ time-entry --headless apply --yes
 Use =--headed= (or omit either option) when debugging.  =login= always opens a
 visible browser for SSO/2FA, and =apply --inspect= requires =--headed=.
 
+As a shortcut for the full sequence, use:
+
+#+begin_example
+time-entry workflow
+time-entry --headless workflow  # only login opens a visible window
+#+end_example
+
+This runs =login=, =get=, =plan= and =diff=, then asks =Do you want to apply
+this?= and =Do you want to submit this?= before those destructive steps.  Both
+prompts default to no.  The optional =YYYY-MM= argument selects a month.
+
 Each command takes an optional =YYYY-MM= argument and defaults to the current
 month.  Also useful:
 

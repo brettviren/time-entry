@@ -1622,6 +1622,38 @@ def cmd_submit(
     ))
 
 
+def cmd_workflow(
+    month_str: str | None,
+    auth_state: Path,
+    config: Config,
+    records: Records,
+    records_path: Path,
+    headless: bool = False,
+) -> None:
+    """Run the interactive monthly workflow with destructive confirmation gates."""
+    cmd_login(auth_state, config)
+    cmd_get(month_str, auth_state, config, records, headless=headless)
+    cmd_plan(month_str, False, config, records, records_path)
+    cmd_diff(month_str, auth_state, config, records, headless=headless)
+
+    if click.confirm("Do you want to apply this?", default=False):
+        cmd_apply(
+            month_str,
+            auth_state,
+            yes=True,
+            inspect=False,
+            config=config,
+            headless=headless,
+        )
+    else:
+        print("Apply skipped.")
+
+    if click.confirm("Do you want to submit this?", default=False):
+        cmd_submit(month_str, auth_state, yes=True, config=config, headless=headless)
+    else:
+        print("Submit skipped.")
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -1657,6 +1689,8 @@ def main(ctx, config_path, records_path, dry_run, headless, auth_state):
     5. apply --yes  # Enter and save time; omit --yes for dry-run
 
     6. submit --yes # Review and submit the timecard
+
+    Or run 'workflow' to execute the sequence with confirmation prompts.
     """
     ctx.ensure_object(dict)
     ctx.obj.update(
@@ -1767,6 +1801,26 @@ def submit(ctx, month, yes):
     """Review and submit a Workday timecard."""
     config, _records = _ctx_load(ctx)
     cmd_submit(month, ctx.obj["auth_state"], yes, config, headless=ctx.obj["headless"])
+
+
+@main.command()
+@click.argument("month", required=False, metavar="YYYY-MM")
+@click.pass_context
+def workflow(ctx, month):
+    """Run login through submission with confirmation prompts."""
+    if ctx.obj["dry_run"]:
+        raise click.UsageError(
+            "--dry-run is not supported by workflow; run the individual commands instead."
+        )
+    config, records = _ctx_load(ctx)
+    cmd_workflow(
+        month,
+        ctx.obj["auth_state"],
+        config,
+        records,
+        ctx.obj["records_path"],
+        headless=ctx.obj["headless"],
+    )
 
 
 if __name__ == "__main__":

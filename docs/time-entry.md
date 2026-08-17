@@ -42,6 +42,8 @@ project-time allocator + Workday automator. Commands:
   HTML for selector debugging. This command does not submit the timecard.
 - `submit [YYYY-MM] [--yes]` — run Workday's Review → Submit flow. Dry-run
   unless `--yes`; keep this separate from `apply` so submission is explicit.
+- `workflow [YYYY-MM]` — run `login`, `get`, `plan` and `diff`, then prompt
+  separately before applying and submitting. Both confirmations default to no.
 
 The top-level `--headless/--headed` option controls Chromium for `get`, `diff`,
 `apply` and `submit`; headed is the default. `login` is always headed, and
