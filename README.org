@@ -25,7 +25,7 @@ uv tool install -e .
 uv run pytest
 #+end_example
 
-The =login=, =get=, =diff= and =apply= commands drive a real browser via
+The =login=, =get=, =diff=, =apply= and =submit= commands drive a real browser via
 Playwright.  Its Chromium must be installed once:
 
 #+begin_example
@@ -51,7 +51,9 @@ time-entry plan          # compute and save this month's allocation
 time-entry get           # read what Workday currently holds
 time-entry diff          # plan vs Workday, saved as a diff JSON
 time-entry apply         # dry-run of the diff
-time-entry apply --yes   # actually enter the days
+time-entry apply --yes   # enter and save the days; does not submit
+time-entry submit        # dry-run: show which month's timecard would submit
+time-entry submit --yes  # review, then submit the timecard
 #+end_example
 
 Each command takes an optional =YYYY-MM= argument and defaults to the current
@@ -93,7 +95,10 @@ dialog with Workday's bulk weekly flows.
 * Cautions and caveats
 
 Workday's DOM is tenant- and version-specific.  The selectors here were
-confirmed against BNL's tenant and drift over time.  To be most cautious, run =apply= without =--yes= first, and re-run =diff= afterwards to confirm what actually landed.
+confirmed against BNL's tenant and drift over time.  To be most cautious, run
+=apply= without =--yes= first, re-run =diff= after =apply --yes= to confirm what
+landed, and only then run =submit --yes=.  Submission is never performed by
+=apply=.
 
 The current policy fills in the month using 8 hour per day atoms so that it is accurate on average compared to the configured %FTE per project.  The current policy has no facility to make individual hours/days record what effort was actually done those specific hours/days.  That is, the configured %FTE per project is taken as ground truth for the month as a whole.
 

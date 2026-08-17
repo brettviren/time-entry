@@ -310,8 +310,50 @@ def test_help(xdg):
     result = CliRunner().invoke(te.main, ["--help"])
     assert result.exit_code == 0
     assert "Monthly time allocator" in result.output
-    for command in ("plan", "show", "status", "init", "install-browser", "login", "get", "diff", "apply"):
+    for command in (
+        "plan", "show", "status", "init", "install-browser", "login", "get", "diff", "apply", "submit",
+    ):
         assert command in result.output
+
+
+def test_save_and_submit_selectors_are_separate():
+    assert "submit" not in te._DIALOG_SELECTORS["save_button"]
+    assert "review" in te._DIALOG_SELECTORS["review_button"]
+    assert "submit" in te._DIALOG_SELECTORS["submit_button"]
+
+
+def test_review_happens_before_submit():
+    events = []
+
+    class FakeLocator:
+        def __init__(self, action):
+            self.action = action
+
+        @property
+        def first(self):
+            return self
+
+        async def wait_for(self, **_kwargs):
+            events.append(("wait", self.action))
+
+        async def click(self):
+            events.append(("click", self.action))
+
+    class FakePage:
+        def locator(self, selector):
+            if selector == te._DIALOG_SELECTORS["review_button"]:
+                return FakeLocator("review")
+            if selector == te._DIALOG_SELECTORS["submit_button"]:
+                return FakeLocator("submit")
+            raise AssertionError(f"unexpected selector: {selector}")
+
+        async def wait_for_load_state(self, state):
+            events.append(("load", state))
+
+    te.asyncio.run(te._review_and_submit(FakePage()))
+
+    clicks = [action for event, action in events if event == "click"]
+    assert clicks == ["review", "submit"]
 
 
 def test_init_writes_config(tmp_path, xdg):
@@ -414,3 +456,57 @@ def test_get_without_auth(tmp_path, xdg):
     ])
     assert result.exit_code != 0
     assert "time-entry login" in result.output
+
+
+def test_submit_without_auth(tmp_path, xdg):
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(GOOD_TOML)
+    result = CliRunner().invoke(te.main, [
+        "--config", str(config_path), "--records", str(tmp_path / "r.json"),
+        "--auth-state", str(tmp_path / "auth.json"),
+        "submit", "2026-07",
+    ])
+    assert result.exit_code != 0
+    assert "time-entry login" in result.output
+
+
+def test_submit_is_dry_run_without_yes(tmp_path, xdg, monkeypatch):
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(GOOD_TOML)
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text("{}")
+
+    def fail_run(_coroutine):
+        pytest.fail("dry-run must not open the browser")
+
+    monkeypatch.setattr(te.asyncio, "run", fail_run)
+    result = CliRunner().invoke(te.main, [
+        "--config", str(config_path), "--records", str(tmp_path / "r.json"),
+        "--auth-state", str(auth_path), "submit", "2026-07",
+    ])
+
+    assert result.exit_code == 0
+    assert "Dry-run" in result.output
+    assert "review and submit" in result.output
+    assert "--yes" in result.output
+
+
+def test_submit_yes_runs_review_submit_flow(tmp_path, xdg, monkeypatch):
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(GOOD_TOML)
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text("{}")
+    calls = []
+
+    async def fake_do_submit(*args):
+        calls.append(args)
+
+    monkeypatch.setattr(te, "_do_submit", fake_do_submit)
+    result = CliRunner().invoke(te.main, [
+        "--config", str(config_path), "--records", str(tmp_path / "r.json"),
+        "--auth-state", str(auth_path), "submit", "2026-07", "--yes",
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert len(calls) == 1
+    assert calls[0][:4] == ("https://example.com/time", auth_path, 2026, 7)

@@ -23,6 +23,7 @@ The main workflow is:
 2. plan
 3. diff
 4. apply
+5. submit
 
 
 `time-entry` (a `uv run` single-file script, dep: `playwright`) is a fiscal-year
@@ -38,7 +39,9 @@ project-time allocator + Workday automator. Commands:
   (the list of `DayChange`s = days needing entry).
 - `apply [YYYY-MM] [--yes] [--inspect]` — drive Workday to enter each change.
   Dry-run unless `--yes`. `--inspect` pauses on the **first** day and dumps panel
-  HTML for selector debugging.
+  HTML for selector debugging. This command does not submit the timecard.
+- `submit [YYYY-MM] [--yes]` — run Workday's Review → Submit flow. Dry-run
+  unless `--yes`; keep this separate from `apply` so submission is explicit.
 
 Config: `time-entry.toml` (projects = code/pct/desc, days_off, workday URLs).
 Records: `time-entry.json`. Auth: `time-entry-auth.json`.
@@ -48,6 +51,8 @@ The time-entry calendar task URL: `https://www.myworkday.com/bnl/d/task/2998$108
 ### Key entry points in the code
 - `cmd_apply` → `_do_apply` (loops over changes) → `_enter_time_for_day` (the
   per-day dialog driver — this is what bulk entry would replace).
+- `cmd_submit` → `_do_submit` navigates to the month, clicks Review, waits for
+  the review state, and clicks Submit.
 - `_DIALOG_SELECTORS` dict holds all the confirmed selectors.
 - `_navigate_to_month` walks prev/next-month buttons to the target month.
 
