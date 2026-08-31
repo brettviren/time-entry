@@ -1623,6 +1623,9 @@ def cmd_submit(
     ))
 
 
+_WORKFLOW_MAX_APPLY_ATTEMPTS = 3
+
+
 def cmd_workflow(
     month_str: str | None,
     auth_state: Path,
@@ -1641,19 +1644,13 @@ def cmd_workflow(
         print("Apply skipped; submit is not offered while the diff has changes.")
         return
 
-    seen_diffs = set()
-    while changes:
-        signature = tuple(
-            (change.day, change.code, change.target_hours, change.current_hours, change.action)
-            for change in changes
+    attempt = 0
+    while changes and attempt < _WORKFLOW_MAX_APPLY_ATTEMPTS:
+        attempt += 1
+        print(
+            f"Apply attempt {attempt}/{_WORKFLOW_MAX_APPLY_ATTEMPTS}: "
+            f"{len(changes)} change(s) remain."
         )
-        if signature in seen_diffs:
-            print(
-                "[warn] Apply made no progress; stopping workflow without submission."
-            )
-            return
-        seen_diffs.add(signature)
-        print(f"{len(changes)} change(s) remain; applying and checking again...")
         cmd_apply(
             month_str,
             auth_state,
@@ -1668,6 +1665,13 @@ def cmd_workflow(
             config,
             records,
             headless=headless,
+        )
+
+    if changes:
+        raise click.ClickException(
+            f"Workflow did not converge after {_WORKFLOW_MAX_APPLY_ATTEMPTS} "
+            f"apply attempts; {len(changes)} change(s) remain. "
+            "The timecard was not submitted."
         )
 
     print("Diff is clean; no changes remain to apply.")

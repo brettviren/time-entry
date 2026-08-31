@@ -77,11 +77,12 @@ time-entry --headless workflow  # only login opens a visible window
 
 This runs =login=, =get=, =plan= and =diff=.  If changes remain, it asks =Do you
 want to apply this?= once, then repeats =apply= and =diff= until the diff is
-clean.  A repeated diff is treated as no progress: the workflow stops without
-submitting.  Only after a clean diff does it ask =Do you want to submit this?=;
-submission remains optional and defaults to no.  The optional =YYYY-MM=
-argument selects a month.  =--dry-run= is not supported by =workflow=; use the
-individual commands for a partial or preview run.
+clean, with a maximum of three apply attempts.  Each attempt prints its number.
+If changes remain after the third attempt, the command exits with an error and
+does not offer submission.  Only after a clean diff does it ask =Do you want to
+submit this?=; submission remains optional and defaults to no.  The optional
+=YYYY-MM= argument selects a month.  =--dry-run= is not supported by =workflow=;
+use the individual commands for a partial or preview run.
 
 Month-oriented commands take an optional =YYYY-MM= argument and default to the
 current month.  Also useful:

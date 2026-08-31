@@ -476,22 +476,32 @@ def test_workflow_does_not_submit_with_pending_changes(tmp_path, config, monkeyp
     assert prompts == [("Do you want to apply this?", False)]
 
 
-def test_workflow_stops_if_apply_makes_no_progress(
+def test_workflow_errors_after_three_apply_attempts(
     tmp_path, config, monkeypatch, capsys,
 ):
     changes = [_workflow_change(1)]
-    events, prompts = _mock_workflow_steps(monkeypatch, [changes, changes], [True])
-    te.cmd_workflow(
-        "2026-07",
-        tmp_path / "auth.json",
-        config,
-        te.Records(fiscal_year=2026),
-        tmp_path / "records.json",
+    events, prompts = _mock_workflow_steps(
+        monkeypatch,
+        [changes, changes, changes, changes],
+        [True],
     )
+    with pytest.raises(click.ClickException, match="did not converge after 3 apply attempts"):
+        te.cmd_workflow(
+            "2026-07",
+            tmp_path / "auth.json",
+            config,
+            te.Records(fiscal_year=2026),
+            tmp_path / "records.json",
+        )
 
-    assert events == ["login", "get", "plan", "diff", "apply", "diff"]
+    assert events == [
+        "login", "get", "plan", "diff",
+        "apply", "diff", "apply", "diff", "apply", "diff",
+    ]
     assert prompts == [("Do you want to apply this?", False)]
-    assert "Apply made no progress" in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert "Apply attempt 1/3" in output
+    assert "Apply attempt 3/3" in output
 
 
 def test_review_happens_before_submit():

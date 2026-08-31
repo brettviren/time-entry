@@ -50,10 +50,11 @@ project-time allocator + Workday automator. Commands:
   Dry-run unless `--yes`; keep this separate from `apply` so submission is
   explicit.
 - `workflow [YYYY-MM]` — run `login`, `get`, `plan` and `diff`, prompt once
-  before applying, then repeat `apply` → `diff` until no changes remain. A
-  repeated diff stops the workflow as stalled. Submission is offered only after
-  a clean diff and remains an optional, default-no prompt. The global
-  `--dry-run` option is rejected for this combined command.
+  before applying, then repeat `apply` → `diff` for at most three apply
+  attempts. Remaining changes after attempt three produce an error and prevent
+  submission. Submission is offered only after a clean diff and remains an
+  optional, default-no prompt. The global `--dry-run` option is rejected for
+  this combined command.
 
 The top-level `--headless/--headed` option controls Chromium for `get`, `diff`,
 `apply` and `submit`; headed is the default. `login` is always headed, and
