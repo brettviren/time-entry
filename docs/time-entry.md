@@ -49,9 +49,11 @@ project-time allocator + Workday automator. Commands:
 - `submit [YYYY-MM] [--yes]` — run the unverified Workday Review → Submit flow.
   Dry-run unless `--yes`; keep this separate from `apply` so submission is
   explicit.
-- `workflow [YYYY-MM]` — run `login`, `get`, `plan` and `diff`, then prompt
-  separately before applying and submitting. Both confirmations default to no;
-  the global `--dry-run` option is rejected for this combined command.
+- `workflow [YYYY-MM]` — run `login`, `get`, `plan` and `diff`, prompt once
+  before applying, then repeat `apply` → `diff` until no changes remain. A
+  repeated diff stops the workflow as stalled. Submission is offered only after
+  a clean diff and remains an optional, default-no prompt. The global
+  `--dry-run` option is rejected for this combined command.
 
 The top-level `--headless/--headed` option controls Chromium for `get`, `diff`,
 `apply` and `submit`; headed is the default. `login` is always headed, and

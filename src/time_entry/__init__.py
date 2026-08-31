@@ -1496,7 +1496,7 @@ def cmd_diff(
     config: Config,
     records: Records,
     headless: bool = False,
-) -> None:
+) -> list[DayChange]:
     if not auth_state.exists():
         sys.exit(
             f"Auth state not found at {auth_state}.\n"
@@ -1525,6 +1525,7 @@ def cmd_diff(
 
     diff_path = _xdg_dir("state") / f"time-entry-diff-{year:04d}-{month:02d}.json"
     display_diff(year, month, changes, matched, skipped, diff_path)
+    return changes
 
 
 def cmd_apply(
@@ -1634,9 +1635,25 @@ def cmd_workflow(
     cmd_login(auth_state, config)
     cmd_get(month_str, auth_state, config, records, headless=headless)
     cmd_plan(month_str, False, config, records, records_path)
-    cmd_diff(month_str, auth_state, config, records, headless=headless)
+    changes = cmd_diff(month_str, auth_state, config, records, headless=headless)
 
-    if click.confirm("Do you want to apply this?", default=False):
+    if changes and not click.confirm("Do you want to apply this?", default=False):
+        print("Apply skipped; submit is not offered while the diff has changes.")
+        return
+
+    seen_diffs = set()
+    while changes:
+        signature = tuple(
+            (change.day, change.code, change.target_hours, change.current_hours, change.action)
+            for change in changes
+        )
+        if signature in seen_diffs:
+            print(
+                "[warn] Apply made no progress; stopping workflow without submission."
+            )
+            return
+        seen_diffs.add(signature)
+        print(f"{len(changes)} change(s) remain; applying and checking again...")
         cmd_apply(
             month_str,
             auth_state,
@@ -1645,8 +1662,15 @@ def cmd_workflow(
             config=config,
             headless=headless,
         )
-    else:
-        print("Apply skipped.")
+        changes = cmd_diff(
+            month_str,
+            auth_state,
+            config,
+            records,
+            headless=headless,
+        )
+
+    print("Diff is clean; no changes remain to apply.")
 
     if click.confirm("Do you want to submit this?", default=False):
         cmd_submit(month_str, auth_state, yes=True, config=config, headless=headless)

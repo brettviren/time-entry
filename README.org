@@ -75,11 +75,13 @@ time-entry workflow
 time-entry --headless workflow  # only login opens a visible window
 #+end_example
 
-This runs =login=, =get=, =plan= and =diff=, then asks =Do you want to apply
-this?= and =Do you want to submit this?= before those destructive steps.  Both
-prompts default to no.  The optional =YYYY-MM= argument selects a month.
-=--dry-run= is not supported by =workflow=; use the individual commands for a
-partial or preview run.
+This runs =login=, =get=, =plan= and =diff=.  If changes remain, it asks =Do you
+want to apply this?= once, then repeats =apply= and =diff= until the diff is
+clean.  A repeated diff is treated as no progress: the workflow stops without
+submitting.  Only after a clean diff does it ask =Do you want to submit this?=;
+submission remains optional and defaults to no.  The optional =YYYY-MM=
+argument selects a month.  =--dry-run= is not supported by =workflow=; use the
+individual commands for a partial or preview run.
 
 Month-oriented commands take an optional =YYYY-MM= argument and default to the
 current month.  Also useful:

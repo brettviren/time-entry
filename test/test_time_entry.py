@@ -382,22 +382,32 @@ def test_workflow_cli_threads_headless_and_optional_month(tmp_path, xdg, monkeyp
     assert "--dry-run is not supported by workflow" in result.output
 
 
-@pytest.mark.parametrize(
-    ("answers", "expected_tail"),
-    [
-        ([False, False], ["apply skipped", "submit skipped"]),
-        ([True, True], ["apply", "submit"]),
-    ],
-)
-def test_workflow_confirmation_gates(tmp_path, config, monkeypatch, answers, expected_tail):
+def _workflow_change(day_number):
+    return te.DayChange(
+        day=date(2026, 7, day_number),
+        code="AAAAA",
+        desc="Project A",
+        target_hours=8,
+        current_hours=0,
+        action="set",
+    )
+
+
+def _mock_workflow_steps(monkeypatch, diff_results, answers):
     events = []
     prompts = []
-    records = te.Records(fiscal_year=2026)
 
     monkeypatch.setattr(te, "cmd_login", lambda *_args, **_kwargs: events.append("login"))
     monkeypatch.setattr(te, "cmd_get", lambda *_args, **_kwargs: events.append("get"))
     monkeypatch.setattr(te, "cmd_plan", lambda *_args, **_kwargs: events.append("plan"))
-    monkeypatch.setattr(te, "cmd_diff", lambda *_args, **_kwargs: events.append("diff"))
+
+    results = iter(diff_results)
+
+    def fake_diff(*_args, **_kwargs):
+        events.append("diff")
+        return next(results)
+
+    monkeypatch.setattr(te, "cmd_diff", fake_diff)
     monkeypatch.setattr(te, "cmd_apply", lambda *_args, **_kwargs: events.append("apply"))
     monkeypatch.setattr(te, "cmd_submit", lambda *_args, **_kwargs: events.append("submit"))
 
@@ -405,27 +415,83 @@ def test_workflow_confirmation_gates(tmp_path, config, monkeypatch, answers, exp
 
     def fake_confirm(prompt, default):
         prompts.append((prompt, default))
-        answer = next(responses)
-        events.append("apply skipped" if prompt.startswith("Do you want to apply") and not answer
-                      else "submit skipped" if not answer else "confirmed")
-        return answer
+        return next(responses)
 
     monkeypatch.setattr(te.click, "confirm", fake_confirm)
+    return events, prompts
+
+
+def test_workflow_repeats_apply_until_diff_is_clean(tmp_path, config, monkeypatch):
+    events, prompts = _mock_workflow_steps(
+        monkeypatch,
+        [
+            [_workflow_change(1), _workflow_change(2)],
+            [_workflow_change(2)],
+            [],
+        ],
+        [True, False],
+    )
     te.cmd_workflow(
         "2026-07",
         tmp_path / "auth.json",
         config,
-        records,
+        te.Records(fiscal_year=2026),
         tmp_path / "records.json",
         headless=True,
     )
 
-    assert events[:4] == ["login", "get", "plan", "diff"]
-    assert [event for event in events if event in expected_tail] == expected_tail
+    assert events == ["login", "get", "plan", "diff", "apply", "diff", "apply", "diff"]
     assert prompts == [
         ("Do you want to apply this?", False),
         ("Do you want to submit this?", False),
     ]
+
+
+def test_workflow_submit_is_optional_after_clean_diff(tmp_path, config, monkeypatch):
+    events, prompts = _mock_workflow_steps(monkeypatch, [[]], [True])
+    te.cmd_workflow(
+        "2026-07",
+        tmp_path / "auth.json",
+        config,
+        te.Records(fiscal_year=2026),
+        tmp_path / "records.json",
+    )
+
+    assert events == ["login", "get", "plan", "diff", "submit"]
+    assert prompts == [("Do you want to submit this?", False)]
+
+
+def test_workflow_does_not_submit_with_pending_changes(tmp_path, config, monkeypatch):
+    changes = [_workflow_change(1)]
+    events, prompts = _mock_workflow_steps(monkeypatch, [changes], [False])
+    te.cmd_workflow(
+        "2026-07",
+        tmp_path / "auth.json",
+        config,
+        te.Records(fiscal_year=2026),
+        tmp_path / "records.json",
+    )
+
+    assert events == ["login", "get", "plan", "diff"]
+    assert prompts == [("Do you want to apply this?", False)]
+
+
+def test_workflow_stops_if_apply_makes_no_progress(
+    tmp_path, config, monkeypatch, capsys,
+):
+    changes = [_workflow_change(1)]
+    events, prompts = _mock_workflow_steps(monkeypatch, [changes, changes], [True])
+    te.cmd_workflow(
+        "2026-07",
+        tmp_path / "auth.json",
+        config,
+        te.Records(fiscal_year=2026),
+        tmp_path / "records.json",
+    )
+
+    assert events == ["login", "get", "plan", "diff", "apply", "diff"]
+    assert prompts == [("Do you want to apply this?", False)]
+    assert "Apply made no progress" in capsys.readouterr().out
 
 
 def test_review_happens_before_submit():
