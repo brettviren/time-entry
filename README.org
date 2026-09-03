@@ -29,8 +29,12 @@ The =login=, =get=, =diff= and =apply= commands drive a real browser via
 Playwright.  Its Chromium must be installed once:
 
 #+begin_example
-uvx playwright install chromium
+time-entry install-browser
 #+end_example
+
+This uses the exact Playwright version bundled with =time-entry=.  Do not use
+an unrelated system =playwright= command, which may download an incompatible
+Chromium revision.
 
 * Basic use
 
