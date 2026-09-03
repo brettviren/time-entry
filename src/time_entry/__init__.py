@@ -940,11 +940,12 @@ async def _do_get(
     year: int,
     month: int,
     debug_html_path: Path,
+    headless: bool = False,
 ) -> list[WorkdayDayEntry]:
     from playwright.async_api import async_playwright
     async with async_playwright() as pw:
         try:
-            browser = await pw.chromium.launch(headless=False)
+            browser = await pw.chromium.launch(headless=headless)
         except Exception as e:
             print(f"Could not launch Chromium: {e}", file=sys.stderr)
             print("Install the matching browser:  time-entry install-browser", file=sys.stderr)
@@ -994,9 +995,14 @@ _DIALOG_SELECTORS = {
     # modal does not block (and time out) the next day's cell click.
     "cancel_button":   '[data-automation-id="wd-CommandButton_uic_cancelButton"], '
                        '[data-automation-id="wd-CommandButton"][title="Cancel"]',
-    # Top-level "Save" button (not used by the per-day OK flow; kept for safety).
-    "save_button":     'button[data-automation-id="save"], button[title="Save"], '
-                       'button[data-automation-id="submit"]',
+    # Top-level actions.  Keep Save and Submit strictly separate: apply may
+    # save entered days, but only the explicit submit command may submit them.
+    "save_button":     'button[data-automation-id="save"]:visible, '
+                       'button[title="Save"]:visible, button:text-is("Save"):visible',
+    "review_button":   'button[data-automation-id="review"]:visible, '
+                       'button[title="Review"]:visible, button:text-is("Review"):visible',
+    "submit_button":   'button[data-automation-id="submit"]:visible, '
+                       'button[title="Submit"]:visible, button:text-is("Submit"):visible',
 }
 
 
@@ -1188,7 +1194,7 @@ async def _enter_time_for_day(page, change: DayChange, inspect: bool) -> bool:
             # Read-back is unreliable, so do NOT discard on a miss: proceed to
             # OK and let a later 'diff' surface any day that didn't take.
             print(f"  [warn] Could not confirm Hours for {change.day}; "
-                  "submitting anyway")
+                  "saving anyway")
     except Exception as e:
         print(f"  [warn] Could not fill hours for {change.day}: {e}")
         await _cancel_panel()
@@ -1242,11 +1248,12 @@ async def _do_apply(
     dry_run: bool,
     inspect: bool,
     debug_html_path: Path,
+    headless: bool = False,
 ) -> None:
     from playwright.async_api import async_playwright
     async with async_playwright() as pw:
         try:
-            browser = await pw.chromium.launch(headless=False)
+            browser = await pw.chromium.launch(headless=headless)
         except Exception as e:
             print(f"Could not launch Chromium: {e}", file=sys.stderr)
             print("Install the matching browser:  time-entry install-browser", file=sys.stderr)
@@ -1287,7 +1294,7 @@ async def _do_apply(
                     await page.wait_for_load_state("networkidle")
                     print("Timesheet saved.")
                 else:
-                    print("[warn] Save button not found — verify the timesheet was saved manually.")
+                    print("Entries committed; no separate Save button found.")
 
         finally:
             html = await page.content()
@@ -1295,6 +1302,79 @@ async def _do_apply(
             print(f"Page HTML saved → {debug_html_path}")
             await context.close()
             await browser.close()
+
+
+async def _do_submit(
+    time_entry_url: str,
+    auth_state_path: Path,
+    year: int,
+    month: int,
+    debug_html_path: Path,
+    headless: bool = False,
+) -> None:
+    """Open a month's timecard and perform Workday's Review -> Submit flow."""
+    from playwright.async_api import async_playwright
+
+    async with async_playwright() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=headless)
+        except Exception as e:
+            raise click.ClickException(
+                f"Could not launch Chromium: {e}. "
+                "Run 'time-entry install-browser' and try again."
+            ) from e
+        context = await browser.new_context(storage_state=str(auth_state_path))
+        page = await context.new_page()
+        try:
+            print(f"Navigating to {time_entry_url} ...")
+            await page.goto(time_entry_url)
+            await page.wait_for_load_state("networkidle")
+            if "myworkday.com" not in page.url:
+                raise click.ClickException(
+                    f"Ended up at {page.url}; the saved session may have expired. "
+                    "Run 'time-entry login' again."
+                )
+            await _navigate_to_month(page, year, month)
+            await _review_and_submit(page)
+        finally:
+            html = await page.content()
+            debug_html_path.write_text(html, encoding="utf-8")
+            print(f"Page HTML saved -> {debug_html_path}")
+            await context.close()
+            await browser.close()
+
+
+async def _review_and_submit(page) -> None:
+    """Click the destructive timecard actions in their required order."""
+    review = page.locator(_DIALOG_SELECTORS["review_button"]).first
+    try:
+        await review.wait_for(state="visible", timeout=10_000)
+        await review.click()
+    except Exception as e:
+        raise click.ClickException(
+            "Review button not found or could not be clicked; "
+            "verify the timecard manually."
+        ) from e
+    try:
+        await page.wait_for_load_state("networkidle")
+    except Exception:
+        pass
+    print("Timecard reviewed.")
+
+    submit = page.locator(_DIALOG_SELECTORS["submit_button"]).first
+    try:
+        await submit.wait_for(state="visible", timeout=10_000)
+        await submit.click()
+    except Exception as e:
+        raise click.ClickException(
+            "Submit button not found or could not be clicked after Review; "
+            "verify the timecard manually."
+        ) from e
+    try:
+        await page.wait_for_load_state("networkidle")
+    except Exception:
+        pass
+    print("Timecard submitted.")
 
 
 # ---------------------------------------------------------------------------
@@ -1384,7 +1464,13 @@ def cmd_login(auth_state: Path, config: Config) -> None:
     asyncio.run(_do_login(config.workday.home_url, auth_state))
 
 
-def cmd_get(month_str: str | None, auth_state: Path, config: Config, records: Records) -> None:
+def cmd_get(
+    month_str: str | None,
+    auth_state: Path,
+    config: Config,
+    records: Records,
+    headless: bool = False,
+) -> None:
     if not auth_state.exists():
         sys.exit(
             f"Auth state not found at {auth_state}.\n"
@@ -1392,12 +1478,25 @@ def cmd_get(month_str: str | None, auth_state: Path, config: Config, records: Re
         )
     year, month = parse_month(month_str, date.today())
     debug_path = _xdg_dir("state") / f"workday_debug_{year:04d}_{month:02d}.html"
-    entries = asyncio.run(_do_get(config.workday.time_entry_url, auth_state, year, month, debug_path))
+    entries = asyncio.run(_do_get(
+        config.workday.time_entry_url,
+        auth_state,
+        year,
+        month,
+        debug_path,
+        headless=headless,
+    ))
     record = next((m for m in records.months if m.year == year and m.month == month), None)
     display_workday_get(year, month, entries, config, record)
 
 
-def cmd_diff(month_str: str | None, auth_state: Path, config: Config, records: Records) -> None:
+def cmd_diff(
+    month_str: str | None,
+    auth_state: Path,
+    config: Config,
+    records: Records,
+    headless: bool = False,
+) -> list[DayChange]:
     if not auth_state.exists():
         sys.exit(
             f"Auth state not found at {auth_state}.\n"
@@ -1412,22 +1511,41 @@ def cmd_diff(month_str: str | None, auth_state: Path, config: Config, records: R
         )
 
     debug_path = _xdg_dir("state") / f"workday_debug_{year:04d}_{month:02d}.html"
-    entries = asyncio.run(_do_get(config.workday.time_entry_url, auth_state, year, month, debug_path))
+    entries = asyncio.run(_do_get(
+        config.workday.time_entry_url,
+        auth_state,
+        year,
+        month,
+        debug_path,
+        headless=headless,
+    ))
 
     plan = _plan_by_date(record, config)
     changes, matched, skipped = _compute_diff(entries, plan)
 
     diff_path = _xdg_dir("state") / f"time-entry-diff-{year:04d}-{month:02d}.json"
     display_diff(year, month, changes, matched, skipped, diff_path)
+    return changes
 
 
-def cmd_apply(month_str: str | None, auth_state: Path, yes: bool, inspect: bool, config: Config) -> None:
+def cmd_apply(
+    month_str: str | None,
+    auth_state: Path,
+    yes: bool,
+    inspect: bool,
+    config: Config,
+    headless: bool = False,
+) -> None:
     if not auth_state.exists():
         sys.exit(
             f"Auth state not found at {auth_state}.\n"
             "Run 'time-entry login' first to save your session."
         )
     year, month = parse_month(month_str, date.today())
+    if inspect and headless:
+        raise click.UsageError(
+            "--inspect requires a visible browser; use --headed instead of --headless."
+        )
 
     # Load changes from the diff JSON produced by 'diff'
     diff_path = _xdg_dir("state") / f"time-entry-diff-{year:04d}-{month:02d}.json"
@@ -1469,7 +1587,99 @@ def cmd_apply(month_str: str | None, auth_state: Path, yes: bool, inspect: bool,
         dry_run=dry_run,
         inspect=inspect,
         debug_html_path=debug_path,
+        headless=headless,
     ))
+
+
+def cmd_submit(
+    month_str: str | None,
+    auth_state: Path,
+    yes: bool,
+    config: Config,
+    headless: bool = False,
+) -> None:
+    if not auth_state.exists():
+        sys.exit(
+            f"Auth state not found at {auth_state}.\n"
+            "Run 'time-entry login' first to save your session."
+        )
+    year, month = parse_month(month_str, date.today())
+    if not yes:
+        print(
+            f"Dry-run: would review and submit the {MONTH_NAMES[month]} {year} "
+            "timecard. Pass --yes to submit."
+        )
+        return
+
+    print(f"Reviewing and submitting the {MONTH_NAMES[month]} {year} timecard...")
+    debug_path = _xdg_dir("state") / f"workday_submit_debug_{year:04d}_{month:02d}.html"
+    asyncio.run(_do_submit(
+        config.workday.time_entry_url,
+        auth_state,
+        year,
+        month,
+        debug_path,
+        headless=headless,
+    ))
+
+
+_WORKFLOW_MAX_APPLY_ATTEMPTS = 3
+
+
+def cmd_workflow(
+    month_str: str | None,
+    auth_state: Path,
+    config: Config,
+    records: Records,
+    records_path: Path,
+    headless: bool = False,
+) -> None:
+    """Run the interactive monthly workflow with destructive confirmation gates."""
+    cmd_login(auth_state, config)
+    cmd_get(month_str, auth_state, config, records, headless=headless)
+    cmd_plan(month_str, False, config, records, records_path)
+    changes = cmd_diff(month_str, auth_state, config, records, headless=headless)
+
+    if changes and not click.confirm("Do you want to apply this?", default=False):
+        print("Apply skipped; submit is not offered while the diff has changes.")
+        return
+
+    attempt = 0
+    while changes and attempt < _WORKFLOW_MAX_APPLY_ATTEMPTS:
+        attempt += 1
+        print(
+            f"Apply attempt {attempt}/{_WORKFLOW_MAX_APPLY_ATTEMPTS}: "
+            f"{len(changes)} change(s) remain."
+        )
+        cmd_apply(
+            month_str,
+            auth_state,
+            yes=True,
+            inspect=False,
+            config=config,
+            headless=headless,
+        )
+        changes = cmd_diff(
+            month_str,
+            auth_state,
+            config,
+            records,
+            headless=headless,
+        )
+
+    if changes:
+        raise click.ClickException(
+            f"Workflow did not converge after {_WORKFLOW_MAX_APPLY_ATTEMPTS} "
+            f"apply attempts; {len(changes)} change(s) remain. "
+            "The timecard was not submitted."
+        )
+
+    print("Diff is clean; no changes remain to apply.")
+
+    if click.confirm("Do you want to submit this?", default=False):
+        cmd_submit(month_str, auth_state, yes=True, config=config, headless=headless)
+    else:
+        print("Submit skipped.")
 
 
 # ---------------------------------------------------------------------------
@@ -1484,11 +1694,13 @@ def cmd_apply(month_str: str | None, auth_state: Path, yes: bool, inspect: bool,
               default=lambda: _xdg_dir("state") / "time-entry.json",
               help="Records JSON (default: ~/.local/state/time-entry/time-entry.json)")
 @click.option("--dry-run", is_flag=True, help="Compute but do not save")
+@click.option("--headless/--headed", default=None,
+              help="Hide/show Chromium (commands default headless; workflow headed)")
 @click.option("--auth-state", "auth_state", type=click.Path(path_type=Path),
               default=lambda: _xdg_dir("state") / "time-entry-auth.json",
               help="Playwright auth-state JSON (default: ~/.local/state/time-entry/time-entry-auth.json)")
 @click.pass_context
-def main(ctx, config_path, records_path, dry_run, auth_state):
+def main(ctx, config_path, records_path, dry_run, headless, auth_state):
     """
     Monthly time allocator for fiscal-year project reporting.
 
@@ -1502,13 +1714,18 @@ def main(ctx, config_path, records_path, dry_run, auth_state):
 
     4. diff         # Local diff
 
-    5. apply --yes  # Opens browser, omit --yes for dry-run.
+    5. apply --yes  # Enter and save time; omit --yes for dry-run
+
+    6. submit --yes # Review and submit the timecard
+
+    Or run 'workflow' to execute the sequence with confirmation prompts.
     """
     ctx.ensure_object(dict)
     ctx.obj.update(
         config_path=config_path,
         records_path=records_path,
         dry_run=dry_run,
+        headless=headless,
         auth_state=auth_state,
     )
 
@@ -1518,6 +1735,12 @@ def _ctx_load(ctx):
     config = load_config(obj["config_path"])
     records = load_records(obj["records_path"], config.fiscal_year)
     return config, records
+
+
+def _browser_headless(ctx, default: bool) -> bool:
+    """Resolve an explicit browser flag or a command-specific default."""
+    selected = ctx.obj["headless"]
+    return default if selected is None else selected
 
 
 @main.command()
@@ -1573,7 +1796,8 @@ def login(ctx):
 def get(ctx, month):
     """Read current Workday time entries for a month."""
     config, records = _ctx_load(ctx)
-    cmd_get(month, ctx.obj["auth_state"], config, records)
+    cmd_get(month, ctx.obj["auth_state"], config, records,
+            headless=_browser_headless(ctx, default=True))
 
 
 @main.command()
@@ -1582,7 +1806,8 @@ def get(ctx, month):
 def diff(ctx, month):
     """Compare Workday entries against plan and save a diff JSON."""
     config, records = _ctx_load(ctx)
-    cmd_diff(month, ctx.obj["auth_state"], config, records)
+    cmd_diff(month, ctx.obj["auth_state"], config, records,
+             headless=_browser_headless(ctx, default=True))
 
 
 @main.command()
@@ -1592,9 +1817,47 @@ def diff(ctx, month):
               help="Pause after first cell click and dump dialog HTML for selector debugging")
 @click.pass_context
 def apply(ctx, month, yes, inspect):
-    """Apply diff JSON changes to Workday."""
+    """Apply diff JSON changes to Workday without submitting."""
     config, _records = _ctx_load(ctx)
-    cmd_apply(month, ctx.obj["auth_state"], yes, inspect, config)
+    cmd_apply(
+        month,
+        ctx.obj["auth_state"],
+        yes,
+        inspect,
+        config,
+        headless=_browser_headless(ctx, default=True),
+    )
+
+
+@main.command()
+@click.argument("month", required=False, metavar="YYYY-MM")
+@click.option("--yes", is_flag=True, help="Review and submit (default: dry-run)")
+@click.pass_context
+def submit(ctx, month, yes):
+    """Review and submit a Workday timecard."""
+    config, _records = _ctx_load(ctx)
+    cmd_submit(month, ctx.obj["auth_state"], yes, config,
+               headless=_browser_headless(ctx, default=True))
+
+
+@main.command()
+@click.argument("month", required=False, metavar="YYYY-MM")
+@click.pass_context
+def workflow(ctx, month):
+    """Run login through submission with confirmation prompts."""
+    if ctx.obj["dry_run"]:
+        raise click.UsageError(
+            "--dry-run is not supported by workflow; run the individual commands instead."
+        )
+    config, records = _ctx_load(ctx)
+    cmd_workflow(
+        month,
+        ctx.obj["auth_state"],
+        config,
+        records,
+        ctx.obj["records_path"],
+        headless=_browser_headless(ctx, default=False),
+    )
 
 
 if __name__ == "__main__":

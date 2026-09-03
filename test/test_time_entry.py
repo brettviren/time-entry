@@ -310,8 +310,245 @@ def test_help(xdg):
     result = CliRunner().invoke(te.main, ["--help"])
     assert result.exit_code == 0
     assert "Monthly time allocator" in result.output
-    for command in ("plan", "show", "status", "init", "install-browser", "login", "get", "diff", "apply"):
+    for command in (
+        "plan", "show", "status", "init", "install-browser", "login", "get", "diff", "apply", "submit",
+        "workflow",
+    ):
         assert command in result.output
+
+
+def test_save_and_submit_selectors_are_separate():
+    assert "submit" not in te._DIALOG_SELECTORS["save_button"]
+    assert "review" in te._DIALOG_SELECTORS["review_button"]
+    assert "submit" in te._DIALOG_SELECTORS["submit_button"]
+
+
+def test_individual_browser_commands_default_headless_and_can_switch(
+    tmp_path, xdg, monkeypatch,
+):
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(GOOD_TOML)
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text("{}")
+    modes = []
+
+    def fake_cmd_get(_month, _auth, _config, _records, headless=False):
+        modes.append(headless)
+
+    monkeypatch.setattr(te, "cmd_get", fake_cmd_get)
+    runner = CliRunner()
+    base = ["--config", str(config_path), "--auth-state", str(auth_path)]
+
+    assert runner.invoke(te.main, [*base, "get", "2026-07"]).exit_code == 0
+    assert runner.invoke(te.main, [*base, "--headless", "get", "2026-07"]).exit_code == 0
+    assert runner.invoke(te.main, [*base, "--headed", "get", "2026-07"]).exit_code == 0
+    assert modes == [True, True, False]
+
+
+def test_inspect_rejects_headless_browser(tmp_path, xdg):
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(GOOD_TOML)
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text("{}")
+    result = CliRunner().invoke(te.main, [
+        "--config", str(config_path), "--auth-state", str(auth_path),
+        "apply", "2026-07", "--inspect",
+    ])
+
+    assert result.exit_code != 0
+    assert "--inspect requires a visible browser" in result.output
+
+
+def test_workflow_cli_threads_headless_and_optional_month(tmp_path, xdg, monkeypatch):
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(GOOD_TOML)
+    calls = []
+
+    def fake_cmd_workflow(*args, **kwargs):
+        calls.append((args, kwargs))
+
+    monkeypatch.setattr(te, "cmd_workflow", fake_cmd_workflow)
+    base = [
+        "--config", str(config_path), "--records", str(tmp_path / "records.json"),
+        "--auth-state", str(tmp_path / "auth.json"),
+    ]
+    result = CliRunner().invoke(te.main, [*base, "workflow"])
+    assert result.exit_code == 0, result.output
+
+    result = CliRunner().invoke(te.main, [*base, "--headless", "workflow"])
+    assert result.exit_code == 0, result.output
+
+    result = CliRunner().invoke(te.main, [*base, "--headed", "workflow"])
+
+    assert result.exit_code == 0, result.output
+    assert all(call[0][0] is None for call in calls)
+    assert [call[1] for call in calls] == [
+        {"headless": False},
+        {"headless": True},
+        {"headless": False},
+    ]
+
+    result = CliRunner().invoke(te.main, [
+        "--config", str(config_path), "--dry-run", "workflow",
+    ])
+    assert result.exit_code != 0
+    assert "--dry-run is not supported by workflow" in result.output
+
+
+def _workflow_change(day_number):
+    return te.DayChange(
+        day=date(2026, 7, day_number),
+        code="AAAAA",
+        desc="Project A",
+        target_hours=8,
+        current_hours=0,
+        action="set",
+    )
+
+
+def _mock_workflow_steps(monkeypatch, diff_results, answers):
+    events = []
+    prompts = []
+
+    monkeypatch.setattr(te, "cmd_login", lambda *_args, **_kwargs: events.append("login"))
+    monkeypatch.setattr(te, "cmd_get", lambda *_args, **_kwargs: events.append("get"))
+    monkeypatch.setattr(te, "cmd_plan", lambda *_args, **_kwargs: events.append("plan"))
+
+    results = iter(diff_results)
+
+    def fake_diff(*_args, **_kwargs):
+        events.append("diff")
+        return next(results)
+
+    monkeypatch.setattr(te, "cmd_diff", fake_diff)
+    monkeypatch.setattr(te, "cmd_apply", lambda *_args, **_kwargs: events.append("apply"))
+    monkeypatch.setattr(te, "cmd_submit", lambda *_args, **_kwargs: events.append("submit"))
+
+    responses = iter(answers)
+
+    def fake_confirm(prompt, default):
+        prompts.append((prompt, default))
+        return next(responses)
+
+    monkeypatch.setattr(te.click, "confirm", fake_confirm)
+    return events, prompts
+
+
+def test_workflow_repeats_apply_until_diff_is_clean(tmp_path, config, monkeypatch):
+    events, prompts = _mock_workflow_steps(
+        monkeypatch,
+        [
+            [_workflow_change(1), _workflow_change(2)],
+            [_workflow_change(2)],
+            [],
+        ],
+        [True, False],
+    )
+    te.cmd_workflow(
+        "2026-07",
+        tmp_path / "auth.json",
+        config,
+        te.Records(fiscal_year=2026),
+        tmp_path / "records.json",
+        headless=True,
+    )
+
+    assert events == ["login", "get", "plan", "diff", "apply", "diff", "apply", "diff"]
+    assert prompts == [
+        ("Do you want to apply this?", False),
+        ("Do you want to submit this?", False),
+    ]
+
+
+def test_workflow_submit_is_optional_after_clean_diff(tmp_path, config, monkeypatch):
+    events, prompts = _mock_workflow_steps(monkeypatch, [[]], [True])
+    te.cmd_workflow(
+        "2026-07",
+        tmp_path / "auth.json",
+        config,
+        te.Records(fiscal_year=2026),
+        tmp_path / "records.json",
+    )
+
+    assert events == ["login", "get", "plan", "diff", "submit"]
+    assert prompts == [("Do you want to submit this?", False)]
+
+
+def test_workflow_does_not_submit_with_pending_changes(tmp_path, config, monkeypatch):
+    changes = [_workflow_change(1)]
+    events, prompts = _mock_workflow_steps(monkeypatch, [changes], [False])
+    te.cmd_workflow(
+        "2026-07",
+        tmp_path / "auth.json",
+        config,
+        te.Records(fiscal_year=2026),
+        tmp_path / "records.json",
+    )
+
+    assert events == ["login", "get", "plan", "diff"]
+    assert prompts == [("Do you want to apply this?", False)]
+
+
+def test_workflow_errors_after_three_apply_attempts(
+    tmp_path, config, monkeypatch, capsys,
+):
+    changes = [_workflow_change(1)]
+    events, prompts = _mock_workflow_steps(
+        monkeypatch,
+        [changes, changes, changes, changes],
+        [True],
+    )
+    with pytest.raises(click.ClickException, match="did not converge after 3 apply attempts"):
+        te.cmd_workflow(
+            "2026-07",
+            tmp_path / "auth.json",
+            config,
+            te.Records(fiscal_year=2026),
+            tmp_path / "records.json",
+        )
+
+    assert events == [
+        "login", "get", "plan", "diff",
+        "apply", "diff", "apply", "diff", "apply", "diff",
+    ]
+    assert prompts == [("Do you want to apply this?", False)]
+    output = capsys.readouterr().out
+    assert "Apply attempt 1/3" in output
+    assert "Apply attempt 3/3" in output
+
+
+def test_review_happens_before_submit():
+    events = []
+
+    class FakeLocator:
+        def __init__(self, action):
+            self.action = action
+
+        @property
+        def first(self):
+            return self
+
+        async def wait_for(self, **_kwargs):
+            events.append(("wait", self.action))
+
+        async def click(self):
+            events.append(("click", self.action))
+
+    class FakePage:
+        def locator(self, selector):
+            if selector == te._DIALOG_SELECTORS["review_button"]:
+                return FakeLocator("review")
+            if selector == te._DIALOG_SELECTORS["submit_button"]:
+                return FakeLocator("submit")
+            raise AssertionError(f"unexpected selector: {selector}")
+
+        async def wait_for_load_state(self, state):
+            events.append(("load", state))
+
+    te.asyncio.run(te._review_and_submit(FakePage()))
+
+    clicks = [action for event, action in events if event == "click"]
+    assert clicks == ["review", "submit"]
 
 
 def test_init_writes_config(tmp_path, xdg):
@@ -414,3 +651,58 @@ def test_get_without_auth(tmp_path, xdg):
     ])
     assert result.exit_code != 0
     assert "time-entry login" in result.output
+
+
+def test_submit_without_auth(tmp_path, xdg):
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(GOOD_TOML)
+    result = CliRunner().invoke(te.main, [
+        "--config", str(config_path), "--records", str(tmp_path / "r.json"),
+        "--auth-state", str(tmp_path / "auth.json"),
+        "submit", "2026-07",
+    ])
+    assert result.exit_code != 0
+    assert "time-entry login" in result.output
+
+
+def test_submit_is_dry_run_without_yes(tmp_path, xdg, monkeypatch):
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(GOOD_TOML)
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text("{}")
+
+    def fail_run(_coroutine):
+        pytest.fail("dry-run must not open the browser")
+
+    monkeypatch.setattr(te.asyncio, "run", fail_run)
+    result = CliRunner().invoke(te.main, [
+        "--config", str(config_path), "--records", str(tmp_path / "r.json"),
+        "--auth-state", str(auth_path), "submit", "2026-07",
+    ])
+
+    assert result.exit_code == 0
+    assert "Dry-run" in result.output
+    assert "review and submit" in result.output
+    assert "--yes" in result.output
+
+
+def test_submit_yes_runs_review_submit_flow(tmp_path, xdg, monkeypatch):
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(GOOD_TOML)
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text("{}")
+    calls = []
+
+    async def fake_do_submit(*args, **kwargs):
+        calls.append((args, kwargs))
+
+    monkeypatch.setattr(te, "_do_submit", fake_do_submit)
+    result = CliRunner().invoke(te.main, [
+        "--config", str(config_path), "--records", str(tmp_path / "r.json"),
+        "--auth-state", str(auth_path), "submit", "2026-07", "--yes",
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert len(calls) == 1
+    assert calls[0][0][:4] == ("https://example.com/time", auth_path, 2026, 7)
+    assert calls[0][1] == {"headless": True}
