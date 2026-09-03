@@ -1694,8 +1694,8 @@ def cmd_workflow(
               default=lambda: _xdg_dir("state") / "time-entry.json",
               help="Records JSON (default: ~/.local/state/time-entry/time-entry.json)")
 @click.option("--dry-run", is_flag=True, help="Compute but do not save")
-@click.option("--headless/--headed", default=False,
-              help="Hide/show Chromium after login (default: headed)")
+@click.option("--headless/--headed", default=None,
+              help="Hide/show Chromium (commands default headless; workflow headed)")
 @click.option("--auth-state", "auth_state", type=click.Path(path_type=Path),
               default=lambda: _xdg_dir("state") / "time-entry-auth.json",
               help="Playwright auth-state JSON (default: ~/.local/state/time-entry/time-entry-auth.json)")
@@ -1735,6 +1735,12 @@ def _ctx_load(ctx):
     config = load_config(obj["config_path"])
     records = load_records(obj["records_path"], config.fiscal_year)
     return config, records
+
+
+def _browser_headless(ctx, default: bool) -> bool:
+    """Resolve an explicit browser flag or a command-specific default."""
+    selected = ctx.obj["headless"]
+    return default if selected is None else selected
 
 
 @main.command()
@@ -1790,7 +1796,8 @@ def login(ctx):
 def get(ctx, month):
     """Read current Workday time entries for a month."""
     config, records = _ctx_load(ctx)
-    cmd_get(month, ctx.obj["auth_state"], config, records, headless=ctx.obj["headless"])
+    cmd_get(month, ctx.obj["auth_state"], config, records,
+            headless=_browser_headless(ctx, default=True))
 
 
 @main.command()
@@ -1799,7 +1806,8 @@ def get(ctx, month):
 def diff(ctx, month):
     """Compare Workday entries against plan and save a diff JSON."""
     config, records = _ctx_load(ctx)
-    cmd_diff(month, ctx.obj["auth_state"], config, records, headless=ctx.obj["headless"])
+    cmd_diff(month, ctx.obj["auth_state"], config, records,
+             headless=_browser_headless(ctx, default=True))
 
 
 @main.command()
@@ -1817,7 +1825,7 @@ def apply(ctx, month, yes, inspect):
         yes,
         inspect,
         config,
-        headless=ctx.obj["headless"],
+        headless=_browser_headless(ctx, default=True),
     )
 
 
@@ -1828,7 +1836,8 @@ def apply(ctx, month, yes, inspect):
 def submit(ctx, month, yes):
     """Review and submit a Workday timecard."""
     config, _records = _ctx_load(ctx)
-    cmd_submit(month, ctx.obj["auth_state"], yes, config, headless=ctx.obj["headless"])
+    cmd_submit(month, ctx.obj["auth_state"], yes, config,
+               headless=_browser_headless(ctx, default=True))
 
 
 @main.command()
@@ -1847,7 +1856,7 @@ def workflow(ctx, month):
         config,
         records,
         ctx.obj["records_path"],
-        headless=ctx.obj["headless"],
+        headless=_browser_headless(ctx, default=False),
     )
 
 

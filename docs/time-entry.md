@@ -57,9 +57,11 @@ project-time allocator + Workday automator. Commands:
   this combined command.
 
 The top-level `--headless/--headed` option controls Chromium for `get`, `diff`,
-`apply` and `submit`; headed is the default. `login` is always headed, and
-`apply --inspect` rejects headless mode because it requires visual interaction.
-Headless execution has not yet been validated against live Workday.
+`apply` and `submit`; these individual commands default to headless. `workflow`
+is headed by default but accepts `--headless` for its post-login steps. `login`
+is always headed. Inspection must be invoked as `--headed apply --inspect`
+because it requires visual interaction. Headless execution has not yet been
+validated against live Workday.
 
 Config: `time-entry.toml` (projects = code/pct/desc, days_off, workday URLs).
 Records: `time-entry.json`. Auth: `time-entry-auth.json`.

@@ -323,7 +323,9 @@ def test_save_and_submit_selectors_are_separate():
     assert "submit" in te._DIALOG_SELECTORS["submit_button"]
 
 
-def test_browser_mode_defaults_to_headed_and_can_be_switched(tmp_path, xdg, monkeypatch):
+def test_individual_browser_commands_default_headless_and_can_switch(
+    tmp_path, xdg, monkeypatch,
+):
     config_path = tmp_path / "config.toml"
     config_path.write_text(GOOD_TOML)
     auth_path = tmp_path / "auth.json"
@@ -340,7 +342,7 @@ def test_browser_mode_defaults_to_headed_and_can_be_switched(tmp_path, xdg, monk
     assert runner.invoke(te.main, [*base, "get", "2026-07"]).exit_code == 0
     assert runner.invoke(te.main, [*base, "--headless", "get", "2026-07"]).exit_code == 0
     assert runner.invoke(te.main, [*base, "--headed", "get", "2026-07"]).exit_code == 0
-    assert modes == [False, True, False]
+    assert modes == [True, True, False]
 
 
 def test_inspect_rejects_headless_browser(tmp_path, xdg):
@@ -350,7 +352,7 @@ def test_inspect_rejects_headless_browser(tmp_path, xdg):
     auth_path.write_text("{}")
     result = CliRunner().invoke(te.main, [
         "--config", str(config_path), "--auth-state", str(auth_path),
-        "--headless", "apply", "2026-07", "--inspect",
+        "apply", "2026-07", "--inspect",
     ])
 
     assert result.exit_code != 0
@@ -366,14 +368,25 @@ def test_workflow_cli_threads_headless_and_optional_month(tmp_path, xdg, monkeyp
         calls.append((args, kwargs))
 
     monkeypatch.setattr(te, "cmd_workflow", fake_cmd_workflow)
-    result = CliRunner().invoke(te.main, [
+    base = [
         "--config", str(config_path), "--records", str(tmp_path / "records.json"),
-        "--auth-state", str(tmp_path / "auth.json"), "--headless", "workflow",
-    ])
+        "--auth-state", str(tmp_path / "auth.json"),
+    ]
+    result = CliRunner().invoke(te.main, [*base, "workflow"])
+    assert result.exit_code == 0, result.output
+
+    result = CliRunner().invoke(te.main, [*base, "--headless", "workflow"])
+    assert result.exit_code == 0, result.output
+
+    result = CliRunner().invoke(te.main, [*base, "--headed", "workflow"])
 
     assert result.exit_code == 0, result.output
-    assert calls[0][0][0] is None
-    assert calls[0][1] == {"headless": True}
+    assert all(call[0][0] is None for call in calls)
+    assert [call[1] for call in calls] == [
+        {"headless": False},
+        {"headless": True},
+        {"headless": False},
+    ]
 
     result = CliRunner().invoke(te.main, [
         "--config", str(config_path), "--dry-run", "workflow",
@@ -692,4 +705,4 @@ def test_submit_yes_runs_review_submit_flow(tmp_path, xdg, monkeypatch):
     assert result.exit_code == 0, result.output
     assert len(calls) == 1
     assert calls[0][0][:4] == ("https://example.com/time", auth_path, 2026, 7)
-    assert calls[0][1] == {"headless": False}
+    assert calls[0][1] == {"headless": True}

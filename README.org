@@ -56,17 +56,19 @@ time-entry submit        # dry-run: show which month's timecard would submit
 time-entry submit --yes  # review, then submit the timecard
 #+end_example
 
-Browser automation is visible by default.  Put the top-level =--headless=
-option before =get=, =diff=, =apply= or =submit= to run Chromium without a
-window, for example:
+The individual =get=, =diff=, =apply= and =submit= commands run Chromium
+headlessly by default.  Put the top-level =--headed= option before the command
+to show the browser, for example:
 
 #+begin_example
-time-entry --headless get
-time-entry --headless apply --yes
+time-entry --headed get
+time-entry --headed apply --yes
 #+end_example
 
-Use =--headed= (or omit either option) when debugging.  =login= always opens a
-visible browser for SSO/2FA, and =apply --inspect= requires =--headed=.
+=workflow= is the exception: it remains headed by default and accepts
+=--headless= as an opt-in for its post-login browser steps.  =login= itself
+always opens a visible browser for SSO/2FA.  Because inspection requires visual
+interaction, invoke it as =time-entry --headed apply --inspect=.
 
 As a shortcut for the full sequence, use:
 
