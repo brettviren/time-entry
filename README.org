@@ -66,15 +66,26 @@ time-entry --headed apply --yes
 #+end_example
 
 =workflow= is the exception: it remains headed by default and accepts
-=--headless= as an opt-in for its post-login browser steps.  =login= itself
-always opens a visible browser for SSO/2FA.  Because inspection requires visual
-interaction, invoke it as =time-entry --headed apply --inspect=.
+=--headless= as an opt-in for its post-login browser steps.  Because
+inspection requires visual interaction, invoke it as =time-entry --headed
+apply --inspect=.
+
+=login= supports two modes, selected by =mode= in the config's =[login]=
+section (the default) and overridable per run with =time-entry login
+--headed= / =--headless=:
+
+- =headed= — opens a visible browser; you complete SSO and DUO manually.
+- =headless= — the script clicks through the "BNL" organization picker on the
+  tenant page and fills the SSO form itself; you only approve the
+  DUO push on your device.  Requires =username= in =[login]=; =password=
+  may also live there, but when omitted you are prompted in the terminal,
+  which keeps it out of the file.
 
 As a shortcut for the full sequence, use:
 
 #+begin_example
 time-entry workflow
-time-entry --headless workflow  # only login opens a visible window
+time-entry --headless workflow  # only a headed login opens a visible window
 #+end_example
 
 This runs =login=, =get=, =plan= and =diff=.  If changes remain, it asks =Do you
@@ -132,9 +143,10 @@ confirmed against BNL's tenant and drift over time.  To be most cautious, run
 landed, and only then run =submit --yes=.  Submission is never performed by
 =apply=.
 
-The new =submit=, =workflow= and headless paths have automated test coverage
-but have not yet been exercised against live Workday.  Test them headed first,
-verify Workday's resulting status manually and expect selector adjustments.
+The new =submit=, =workflow= and headless post-login paths have automated test
+coverage but have not yet been exercised against live Workday.  Test them
+headed first, verify Workday's resulting status manually and expect selector
+adjustments.  Headless =login= has been confirmed against the live tenant.
 
 The current policy fills in the month using 8 hour per day atoms so that it is accurate on average compared to the configured %FTE per project.  The current policy has no facility to make individual hours/days record what effort was actually done those specific hours/days.  That is, the configured %FTE per project is taken as ground truth for the month as a whole.
 

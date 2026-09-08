@@ -25,6 +25,7 @@
 
 import asyncio
 import calendar
+import getpass
 import json
 import os
 import re
@@ -98,6 +99,23 @@ class WorkdayConfig:
     time_entry_url: str = "https://www.myworkday.com/bnl/d/task/2998$10895.htmld"
 
 
+LOGIN_MODES = ("headed", "headless")
+
+
+@dataclass
+class LoginConfig:
+    """Login behavior for the 'login' command.
+
+    mode "headed" opens a visible browser for manual SSO+DUO; mode "headless"
+    fills the SSO form from the configured credentials and only asks the user
+    to approve DUO on their device.
+    """
+
+    mode: str = "headed"
+    username: str = ""
+    password: str | None = None
+
+
 @dataclass
 class WorkdayDayEntry:
     day: date
@@ -147,6 +165,18 @@ days_off = [
 home_url      = "https://www.myworkday.com/bnl/d/pex/home.htmld"
 # FIX: Give the URL
 time_entry_url = "https://www.myworkday.com/bnl/d/task/XXXX$YYYYY.htmld"
+
+# Login behavior for the 'login' command.
+# [login] must appear before [[projects]] (TOML table-header ordering).
+# mode = "headed" opens a visible browser; you complete SSO and DUO manually.
+# mode = "headless" fills the SSO form for you; you only approve the DUO
+# push on your device.  Headless mode requires username.  password is
+# optional — when omitted you are prompted in the terminal, which keeps it
+# out of this file.
+[login]
+mode = "headed"
+username = ""
+# password = "..."
 
 # Project codes, percentage targets, and short descriptions.
 # Percentages must sum to 100.
@@ -203,7 +233,24 @@ def load_config(path: Path) -> "Config":
         home_url=wd_raw.get("home_url", WorkdayConfig.home_url),
         time_entry_url=wd_raw.get("time_entry_url", WorkdayConfig.time_entry_url),
     )
-    return Config(fiscal_year=fiscal_year, projects=projects, days_off=days_off, workday=workday)
+    login_raw = raw.get("login", {})
+    login = LoginConfig(
+        mode=str(login_raw.get("mode", LoginConfig.mode)).lower(),
+        username=str(login_raw.get("username", "")),
+        password=login_raw.get("password"),
+    )
+    if login.mode not in LOGIN_MODES:
+        raise click.ClickException(
+            f"Invalid configuration in {path}: login mode must be one of "
+            f"{', '.join(LOGIN_MODES)}, got {login.mode!r}."
+        )
+    return Config(
+        fiscal_year=fiscal_year,
+        projects=projects,
+        days_off=days_off,
+        workday=workday,
+        login=login,
+    )
 
 
 @dataclass
@@ -212,6 +259,7 @@ class Config:
     projects: list[Project]
     days_off: set[date]
     workday: WorkdayConfig = field(default_factory=WorkdayConfig)
+    login: LoginConfig = field(default_factory=LoginConfig)
 
 
 # ---------------------------------------------------------------------------
@@ -934,6 +982,130 @@ async def _do_login(home_url: str, auth_state_path: Path) -> None:
         await browser.close()
 
 
+# Multi-variant selectors for the login path the Workday home URL leads to:
+# first an organization picker on the tenant page itself (click "BNL"), then
+# the SSO form it redirects to.  Confirmed against the live BNL tenant.
+_SSO_SELECTORS = {
+    "organization": [
+        'button:has-text("BNL")',
+        'a:has-text("BNL")',
+        ':text-is("BNL")',
+    ],
+    "username": [
+        'input[name="username"]',
+        'input[name="UserName"]',          # ADFS
+        'input#username',
+        'input#userNameInput',             # ADFS
+        'input[type="email"]',
+    ],
+    "password": ['input[type="password"]'],
+    "submit": [
+        'button[type="submit"]',
+        'input[type="submit"]',
+        'span#submitButton',               # ADFS
+        'button:has-text("Sign in")',
+        'button:has-text("Log in")',
+    ],
+}
+
+# How long headless login waits for the user to approve DUO before giving up.
+_DUO_TIMEOUT_S = 180
+
+
+async def _wait_first_visible(page, selectors: list[str], timeout_s: float = 10.0):
+    """Like _first_visible, but gives the page a moment to render each candidate."""
+    per_ms = max(1000, int(1000 * timeout_s / len(selectors)))
+    for sel in selectors:
+        loc = page.locator(sel).first
+        try:
+            await loc.wait_for(state="visible", timeout=per_ms)
+            return loc
+        except Exception:
+            pass
+    return None
+
+
+async def _do_login_headless(
+    home_url: str,
+    auth_state_path: Path,
+    username: str,
+    password: str,
+) -> None:
+    """Log in without a visible browser: fill the SSO form, then wait for the
+    user to approve the DUO push on their device and for the page to land back
+    on Workday before saving the session."""
+    from playwright.async_api import async_playwright
+    async with async_playwright() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:
+            print(f"Could not launch Chromium: {e}", file=sys.stderr)
+            print("Install the matching browser:  time-entry install-browser", file=sys.stderr)
+            return
+        context = await browser.new_context()
+        page = await context.new_page()
+        try:
+            print(f"Navigating to {home_url} ...")
+            await page.goto(home_url)
+            await page.wait_for_load_state("networkidle")
+
+            # The tenant page first shows an organization picker; click "BNL"
+            # to reach the actual SSO login form.
+            org_loc = await _wait_first_visible(
+                page, _SSO_SELECTORS["organization"], timeout_s=5)
+            if org_loc is not None:
+                await org_loc.click()
+                await page.wait_for_load_state("networkidle")
+
+            if "myworkday.com" in page.url:
+                print("Already logged in — no SSO form presented.")
+            else:
+                user_loc = await _wait_first_visible(page, _SSO_SELECTORS["username"])
+                pass_loc = await _wait_first_visible(page, _SSO_SELECTORS["password"])
+                if user_loc is None or pass_loc is None:
+                    print(f"[warn] No SSO login form found at {page.url}", file=sys.stderr)
+                    print("The SSO page may have changed; run 'time-entry login "
+                          "--headed' to log in manually.", file=sys.stderr)
+                    return
+                await user_loc.fill(username)
+                await pass_loc.fill(password)
+                submit_loc = await _first_visible(page, _SSO_SELECTORS["submit"])
+                if submit_loc is not None:
+                    await submit_loc.click()
+                else:
+                    await pass_loc.press("Enter")
+                print("Credentials submitted.")
+
+            # Best-effort: some DUO prompts wait for an explicit "Send push"
+            # click (possibly inside the DUO iframe) before notifying a device.
+            for frame in page.frames:
+                push = frame.locator(
+                    'button:has-text("Push"), button:has-text("Send Me a Push")')
+                try:
+                    if await push.count() > 0:
+                        await push.first.click()
+                        print("Requested a DUO push.")
+                        break
+                except Exception:
+                    pass
+
+            print("Approve the DUO request on your device; waiting for Workday ...")
+            for _ in range(_DUO_TIMEOUT_S // 2):
+                await page.wait_for_timeout(2000)
+                if "myworkday.com" in page.url:
+                    break
+            else:
+                print(f"[warn] Not back at Workday after {_DUO_TIMEOUT_S}s "
+                      f"(at {page.url}); session NOT saved.", file=sys.stderr)
+                return
+            await page.wait_for_load_state("networkidle")
+            await context.storage_state(path=str(auth_state_path))
+            print(f"Auth state saved → {auth_state_path}")
+        finally:
+            await context.close()
+            await browser.close()
+
+
 async def _do_get(
     time_entry_url: str,
     auth_state_path: Path,
@@ -1460,8 +1632,25 @@ def cmd_install_browser() -> None:
         )
 
 
-def cmd_login(auth_state: Path, config: Config) -> None:
-    asyncio.run(_do_login(config.workday.home_url, auth_state))
+def cmd_login(auth_state: Path, config: Config, headless: bool | None = None) -> None:
+    """Log in and save auth state.
+
+    `headless` None follows config.login.mode; True/False overrides it."""
+    use_headless = (config.login.mode == "headless") if headless is None else headless
+    if not use_headless:
+        asyncio.run(_do_login(config.workday.home_url, auth_state))
+        return
+    if not config.login.username:
+        raise click.ClickException(
+            "Headless login requires 'username' in the [login] section of "
+            "the config file — set it, or run 'time-entry login --headed'."
+        )
+    password = config.login.password
+    if not password:
+        password = getpass.getpass(f"Password for {config.login.username}: ")
+    asyncio.run(_do_login_headless(
+        config.workday.home_url, auth_state, config.login.username, password,
+    ))
 
 
 def cmd_get(
@@ -1783,11 +1972,18 @@ def install_browser():
 
 
 @main.command()
+@click.option("--headless/--headed", "login_headless", default=None,
+              help="Override the [login] mode from the config for this run.")
 @click.pass_context
-def login(ctx):
-    """Open browser for manual SSO+DUO login and save auth state."""
+def login(ctx, login_headless):
+    """Log in via SSO+DUO and save auth state.
+
+    Headed mode opens a visible browser for manual login; headless mode
+    fills the SSO form from the [login] config section and only waits for
+    you to approve DUO on your device.  The default comes from the config.
+    """
     config, _ = _ctx_load(ctx)
-    cmd_login(ctx.obj["auth_state"], config)
+    cmd_login(ctx.obj["auth_state"], config, headless=login_headless)
 
 
 @main.command()

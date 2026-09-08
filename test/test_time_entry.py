@@ -220,6 +220,33 @@ def test_load_config_reports_template_parse_errors(tmp_path):
         te.load_config(path)
 
 
+def test_load_config_login_defaults(config):
+    assert config.login.mode == "headed"
+    assert config.login.username == ""
+    assert config.login.password is None
+
+
+def test_load_config_login_section(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text(GOOD_TOML.replace(
+        "[[projects]]",
+        '[login]\nmode = "Headless"\nusername = "jdoe"\npassword = "pw"\n\n[[projects]]',
+        1,
+    ))
+    config = te.load_config(path)
+    assert config.login.mode == "headless"
+    assert config.login.username == "jdoe"
+    assert config.login.password == "pw"
+
+
+def test_load_config_rejects_bad_login_mode(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text(GOOD_TOML.replace(
+        "[[projects]]", '[login]\nmode = "invisible"\n\n[[projects]]', 1))
+    with pytest.raises(click.ClickException, match="login mode"):
+        te.load_config(path)
+
+
 def test_records_round_trip(tmp_path, config):
     weeks = te.get_weeks_in_month(2026, 7, config.days_off)
     alloc = te.compute_allocation(2026, 7, config, te.Records(fiscal_year=2026))
@@ -357,6 +384,71 @@ def test_inspect_rejects_headless_browser(tmp_path, xdg):
 
     assert result.exit_code != 0
     assert "--inspect requires a visible browser" in result.output
+
+
+HEADLESS_LOGIN_TOML = GOOD_TOML.replace(
+    "[[projects]]",
+    '[login]\nmode = "headless"\nusername = "jdoe"\npassword = "pw"\n\n[[projects]]',
+    1,
+)
+
+
+def test_login_cli_uses_config_mode_and_override(tmp_path, xdg, monkeypatch):
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(HEADLESS_LOGIN_TOML)
+    auth_path = tmp_path / "auth.json"
+    calls = []
+
+    async def fake_headed(home_url, auth):
+        calls.append(("headed", home_url))
+
+    async def fake_headless(home_url, auth, username, password):
+        calls.append(("headless", username, password))
+
+    monkeypatch.setattr(te, "_do_login", fake_headed)
+    monkeypatch.setattr(te, "_do_login_headless", fake_headless)
+    runner = CliRunner()
+    base = ["--config", str(config_path), "--auth-state", str(auth_path)]
+
+    assert runner.invoke(te.main, [*base, "login"]).exit_code == 0
+    assert runner.invoke(te.main, [*base, "login", "--headed"]).exit_code == 0
+    assert runner.invoke(te.main, [*base, "login", "--headless"]).exit_code == 0
+    assert calls == [
+        ("headless", "jdoe", "pw"),
+        ("headed", "https://example.com/home"),
+        ("headless", "jdoe", "pw"),
+    ]
+
+
+def test_headless_login_requires_username(tmp_path, xdg):
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(HEADLESS_LOGIN_TOML.replace('username = "jdoe"\n', ""))
+    result = CliRunner().invoke(te.main, [
+        "--config", str(config_path),
+        "--auth-state", str(tmp_path / "auth.json"),
+        "login",
+    ])
+    assert result.exit_code != 0
+    assert "username" in result.output
+
+
+def test_headless_login_prompts_for_password(tmp_path, xdg, monkeypatch):
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(HEADLESS_LOGIN_TOML.replace('password = "pw"\n', ""))
+    calls = []
+
+    async def fake_headless(home_url, auth, username, password):
+        calls.append((username, password))
+
+    monkeypatch.setattr(te, "_do_login_headless", fake_headless)
+    monkeypatch.setattr(te.getpass, "getpass", lambda prompt: "typed-pw")
+    result = CliRunner().invoke(te.main, [
+        "--config", str(config_path),
+        "--auth-state", str(tmp_path / "auth.json"),
+        "login",
+    ])
+    assert result.exit_code == 0, result.output
+    assert calls == [("jdoe", "typed-pw")]
 
 
 def test_workflow_cli_threads_headless_and_optional_month(tmp_path, xdg, monkeypatch):
