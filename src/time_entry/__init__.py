@@ -29,6 +29,7 @@ import getpass
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tomllib
@@ -113,7 +114,7 @@ class LoginConfig:
 
     mode: str = "headed"
     username: str = ""
-    password: str | None = None
+    password_command: str | None = None
 
 
 @dataclass
@@ -170,13 +171,13 @@ time_entry_url = "https://www.myworkday.com/bnl/d/task/XXXX$YYYYY.htmld"
 # [login] must appear before [[projects]] (TOML table-header ordering).
 # mode = "headed" opens a visible browser; you complete SSO and DUO manually.
 # mode = "headless" fills the SSO form for you; you only approve the DUO
-# push on your device.  Headless mode requires username.  password is
-# optional — when omitted you are prompted in the terminal, which keeps it
-# out of this file.
+# push on your device. Headless mode requires username. An optional command
+# supplies the password on its first stdout line; otherwise prompt securely
+# in the terminal. Never store the password itself in this file.
 [login]
 mode = "headed"
 username = ""
-# password = "..."
+# password_command = "pass gov/bnl/domain"
 
 # Project codes, percentage targets, and short descriptions.
 # Percentages must sum to 100.
@@ -234,10 +235,20 @@ def load_config(path: Path) -> "Config":
         time_entry_url=wd_raw.get("time_entry_url", WorkdayConfig.time_entry_url),
     )
     login_raw = raw.get("login", {})
+    if "password" in login_raw:
+        raise click.ClickException(
+            "Plaintext [login] password is no longer supported. Remove it from "
+            "the config and use password_command or the terminal password prompt."
+        )
+    password_command = login_raw.get("password_command")
+    if password_command is not None and (
+        not isinstance(password_command, str) or not password_command.strip()
+    ):
+        raise click.ClickException("[login] password_command must be a non-empty string.")
     login = LoginConfig(
         mode=str(login_raw.get("mode", LoginConfig.mode)).lower(),
         username=str(login_raw.get("username", "")),
-        password=login_raw.get("password"),
+        password_command=password_command,
     )
     if login.mode not in LOGIN_MODES:
         raise click.ClickException(
@@ -1632,6 +1643,33 @@ def cmd_install_browser() -> None:
         )
 
 
+def resolve_password(login: LoginConfig) -> str:
+    """Prompt securely or read the first stdout line of a password command."""
+    if login.password_command is None:
+        return getpass.getpass(f"Password for {login.username}: ")
+    try:
+        command = shlex.split(login.password_command)
+    except ValueError:
+        raise click.ClickException("Invalid quoting in password command.") from None
+    if not command:
+        raise click.ClickException("Password command must not be empty.")
+    try:
+        result = subprocess.run(command, capture_output=True, check=False)
+    except OSError:
+        raise click.ClickException("Unable to execute password command.") from None
+    if result.returncode:
+        raise click.ClickException(
+            f"Password command failed (exit status {result.returncode})."
+        )
+    try:
+        password = result.stdout.split(b"\n", 1)[0].removesuffix(b"\r").decode("utf-8")
+    except UnicodeDecodeError:
+        raise click.ClickException("Password command output must be UTF-8.") from None
+    if not password:
+        raise click.ClickException("Password command returned an empty password.")
+    return password
+
+
 def cmd_login(auth_state: Path, config: Config, headless: bool | None = None) -> None:
     """Log in and save auth state.
 
@@ -1645,9 +1683,7 @@ def cmd_login(auth_state: Path, config: Config, headless: bool | None = None) ->
             "Headless login requires 'username' in the [login] section of "
             "the config file — set it, or run 'time-entry login --headed'."
         )
-    password = config.login.password
-    if not password:
-        password = getpass.getpass(f"Password for {config.login.username}: ")
+    password = resolve_password(config.login)
     asyncio.run(_do_login_headless(
         config.workday.home_url, auth_state, config.login.username, password,
     ))
@@ -1888,8 +1924,10 @@ def cmd_workflow(
 @click.option("--auth-state", "auth_state", type=click.Path(path_type=Path),
               default=lambda: _xdg_dir("state") / "time-entry-auth.json",
               help="Playwright auth-state JSON (default: ~/.local/state/time-entry/time-entry-auth.json)")
+@click.option("--password-command",
+              help="Command supplying the first stdout line as the login password (overrides config).")
 @click.pass_context
-def main(ctx, config_path, records_path, dry_run, headless, auth_state):
+def main(ctx, config_path, records_path, dry_run, headless, auth_state, password_command):
     """
     Monthly time allocator for fiscal-year project reporting.
 
@@ -1916,12 +1954,15 @@ def main(ctx, config_path, records_path, dry_run, headless, auth_state):
         dry_run=dry_run,
         headless=headless,
         auth_state=auth_state,
+        password_command=password_command,
     )
 
 
 def _ctx_load(ctx):
     obj = ctx.obj
     config = load_config(obj["config_path"])
+    if obj["password_command"] is not None:
+        config.login.password_command = obj["password_command"]
     records = load_records(obj["records_path"], config.fiscal_year)
     return config, records
 

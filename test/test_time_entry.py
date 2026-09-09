@@ -6,6 +6,8 @@ wiring, including where configuration and state are looked for.
 """
 
 import json
+import shlex
+import sys
 from datetime import date
 
 import pytest
@@ -223,20 +225,20 @@ def test_load_config_reports_template_parse_errors(tmp_path):
 def test_load_config_login_defaults(config):
     assert config.login.mode == "headed"
     assert config.login.username == ""
-    assert config.login.password is None
+    assert config.login.password_command is None
 
 
 def test_load_config_login_section(tmp_path):
     path = tmp_path / "config.toml"
     path.write_text(GOOD_TOML.replace(
         "[[projects]]",
-        '[login]\nmode = "Headless"\nusername = "jdoe"\npassword = "pw"\n\n[[projects]]',
+        '[login]\nmode = "Headless"\nusername = "jdoe"\npassword_command = "helper"\n\n[[projects]]',
         1,
     ))
     config = te.load_config(path)
     assert config.login.mode == "headless"
     assert config.login.username == "jdoe"
-    assert config.login.password == "pw"
+    assert config.login.password_command == "helper"
 
 
 def test_load_config_rejects_bad_login_mode(tmp_path):
@@ -388,7 +390,7 @@ def test_inspect_rejects_headless_browser(tmp_path, xdg):
 
 HEADLESS_LOGIN_TOML = GOOD_TOML.replace(
     "[[projects]]",
-    '[login]\nmode = "headless"\nusername = "jdoe"\npassword = "pw"\n\n[[projects]]',
+    '[login]\nmode = "headless"\nusername = "jdoe"\npassword_command = "helper"\n\n[[projects]]',
     1,
 )
 
@@ -407,6 +409,7 @@ def test_login_cli_uses_config_mode_and_override(tmp_path, xdg, monkeypatch):
 
     monkeypatch.setattr(te, "_do_login", fake_headed)
     monkeypatch.setattr(te, "_do_login_headless", fake_headless)
+    monkeypatch.setattr(te, "resolve_password", lambda login: "pw")
     runner = CliRunner()
     base = ["--config", str(config_path), "--auth-state", str(auth_path)]
 
@@ -434,7 +437,7 @@ def test_headless_login_requires_username(tmp_path, xdg):
 
 def test_headless_login_prompts_for_password(tmp_path, xdg, monkeypatch):
     config_path = tmp_path / "config.toml"
-    config_path.write_text(HEADLESS_LOGIN_TOML.replace('password = "pw"\n', ""))
+    config_path.write_text(HEADLESS_LOGIN_TOML.replace('password_command = "helper"\n', ""))
     calls = []
 
     async def fake_headless(home_url, auth, username, password):
@@ -798,3 +801,110 @@ def test_submit_yes_runs_review_submit_flow(tmp_path, xdg, monkeypatch):
     assert len(calls) == 1
     assert calls[0][0][:4] == ("https://example.com/time", auth_path, 2026, 7)
     assert calls[0][1] == {"headless": True}
+
+
+@pytest.mark.parametrize("value", ['""', '"  "', "42", "false", "[]"])
+def test_reject_invalid_password_command_config(tmp_path, value):
+    path = tmp_path / "config.toml"
+    path.write_text(GOOD_TOML.replace(
+        "[[projects]]", f"[login]\npassword_command = {value}\n[[projects]]", 1,
+    ))
+    with pytest.raises(click.ClickException, match="non-empty string"):
+        te.load_config(path)
+
+
+def test_reject_plaintext_password_without_exposing_it(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text(HEADLESS_LOGIN_TOML.replace(
+        'password_command = "helper"', 'password = "secret-password"',
+    ))
+    with pytest.raises(click.ClickException, match="Remove it") as excinfo:
+        te.load_config(path)
+    assert "secret-password" not in str(excinfo.value)
+
+
+def password_helper(tmp_path, source):
+    path = tmp_path / "password helper.py"
+    path.write_text(source)
+    return shlex.join([sys.executable, str(path)])
+
+
+@pytest.mark.parametrize("ending", ["", "\n", "\r\nextra metadata\n"])
+def test_password_command_preserves_spaces_and_reads_first_line(tmp_path, ending):
+    value = "  secret $word  "
+    command = password_helper(tmp_path, f"import sys; sys.stdout.write({value + ending!r})")
+    assert te.resolve_password(te.LoginConfig(password_command=command)) == value
+
+
+@pytest.mark.parametrize("source, message", [
+    ("", "empty password"),
+    ('print("\\nmetadata")', "empty password"),
+    ('import sys; sys.stdout.buffer.write(bytes([255]))', "UTF-8"),
+    ('import sys; print("secret"); print("secret", file=sys.stderr); sys.exit(7)', "exit status 7"),
+])
+def test_password_command_failure_hides_output(tmp_path, capsys, source, message):
+    command = password_helper(tmp_path, source)
+    with pytest.raises(click.ClickException, match=message) as excinfo:
+        te.resolve_password(te.LoginConfig(password_command=command))
+    assert "secret" not in str(excinfo.value)
+    assert capsys.readouterr() == ("", "")
+
+
+@pytest.mark.parametrize("command, message", [
+    ("", "must not be empty"),
+    ("'secret", "Invalid quoting"),
+    ("/nonexistent/time-entry-password-helper", "Unable to execute"),
+])
+def test_password_command_invalid_execution(command, message):
+    with pytest.raises(click.ClickException, match=message):
+        te.resolve_password(te.LoginConfig(password_command=command))
+
+
+@pytest.mark.parametrize("override", [False, True])
+def test_login_password_command_cli(tmp_path, xdg, monkeypatch, override):
+    command = password_helper(tmp_path, 'print("command-password")')
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(HEADLESS_LOGIN_TOML.replace(
+        '"helper"', '"unused-command"' if override else json.dumps(command),
+    ))
+    calls = []
+
+    async def fake_headless(home_url, auth, username, password):
+        calls.append(password)
+
+    monkeypatch.setattr(te, "_do_login_headless", fake_headless)
+    args = ["--config", str(config_path)]
+    if override:
+        args += ["--password-command", command]
+    result = CliRunner().invoke(te.main, [*args, "login"])
+    assert result.exit_code == 0, result.output
+    assert calls == ["command-password"]
+    assert "command-password" not in result.output
+
+
+def test_headed_login_does_not_run_password_command(tmp_path, config, monkeypatch):
+    config.login.password_command = "/nonexistent/helper"
+    calls = []
+
+    async def fake_headed(*args):
+        calls.append(True)
+
+    monkeypatch.setattr(te, "_do_login", fake_headed)
+    te.cmd_login(tmp_path / "auth.json", config)
+    assert calls == [True]
+
+
+def test_workflow_password_command_override(tmp_path, xdg, monkeypatch):
+    path = tmp_path / "config.toml"
+    path.write_text(HEADLESS_LOGIN_TOML)
+    calls = []
+
+    def fake_workflow(month, auth, config, *args, **kwargs):
+        calls.append(config.login.password_command)
+
+    monkeypatch.setattr(te, "cmd_workflow", fake_workflow)
+    result = CliRunner().invoke(te.main, [
+        "--config", str(path), "--password-command", "override-helper", "workflow",
+    ])
+    assert result.exit_code == 0, result.output
+    assert calls == ["override-helper"]

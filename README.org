@@ -77,9 +77,34 @@ section (the default) and overridable per run with =time-entry login
 - =headed= — opens a visible browser; you complete SSO and DUO manually.
 - =headless= — the script clicks through the "BNL" organization picker on the
   tenant page and fills the SSO form itself; you only approve the
-  DUO push on your device.  Requires =username= in =[login]=; =password=
-  may also live there, but when omitted you are prompted in the terminal,
-  which keeps it out of the file.
+  DUO push on your device. Requires =username= in =[login]=. By default,
+  the password is prompted in the terminal with input hidden.
+
+To retrieve the password from a password manager, configure a command:
+
+#+begin_src toml
+[login]
+mode = "headless"
+username = "jdoe"
+password_command = "pass gov/bnl/domain"
+#+end_src
+
+Or override it for one invocation (also supported with =workflow=):
+
+#+begin_example
+time-entry --password-command=time-entry-pass.sh login --headless
+#+end_example
+
+The command runs only for headless login. Its first stdout line is the
+password; later lines are ignored, and password spaces are preserved.
+Commands support quoted arguments and use PATH lookup, without shell
+expansion or pipelines. For shell operations, use an executable script
+with a shebang (for example, =#!/bin/sh=), or pass an explicit shell. A
+script may run =pass gov/bnl/domain | head -1=; invoking =pass= directly
+avoids needing that pipeline. Failed commands and empty passwords abort
+login without printing command output. Omit =password_command= to use
+the terminal prompt. The old plaintext =[login] password= option is
+rejected: remove it from existing config files.
 
 As a shortcut for the full sequence, use:
 

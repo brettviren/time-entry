@@ -42,8 +42,9 @@ project-time allocator + Workday automator. Commands:
   (overridable with `login --headed` / `login --headless`): **headed** opens a
   visible Chromium for manual login; **headless** clicks through the "BNL"
   organization picker on the tenant page, fills the SSO form from
-  `[login] username`/`password` (password prompted in the terminal when not
-  configured) and then waits for the user to approve DUO on their device.
+  `[login] username` and `password_command` (password prompted in the terminal
+  when the command is omitted) and then waits for the user to approve DUO
+  on their device.
 - `plan [YYYY-MM]` — compute & save a Hamilton/largest-remainder allocation of
   working days to projects; store in `time-entry.json`.
 - `show` / `status` — display the plan / FY-to-date totals.
@@ -75,7 +76,10 @@ visual interaction. Headless execution of the post-login commands has not yet
 been validated against live Workday.
 
 Config: `time-entry.toml` (projects = code/pct/desc, days_off, workday URLs,
-`[login]` mode/username/password).
+`[login]` mode/username/password_command). Plaintext `password` is rejected.
+The global `--password-command` overrides the configured command for login
+and workflow. Commands run without a shell; the first stdout line supplies
+the password. Command output is never included in failure messages.
 Records: `time-entry.json`. Auth: `time-entry-auth.json`.
 
 The time-entry calendar task URL: `https://www.myworkday.com/bnl/d/task/2998$10895.htmld`
