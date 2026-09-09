@@ -6,7 +6,9 @@ dialog with mandatory settle delays, so ~21 days takes a long time.
 
 The newer `submit`, `workflow` and headless paths have automated coverage but
 **have not been tested against live Workday**. In particular, the Review and
-Submit selectors are candidates until confirmed against the tenant.
+Submit selectors are candidates until confirmed against the tenant.  Headless
+`login` is the exception: it has been run successfully against the live tenant
+(organization picker → SSO form → DUO push).
 
 This document is the prompt for the **next phase**: replacing the one-day-at-a-time
 entry with one of Workday's **bulk weekly** entry flows. It also records the
@@ -35,8 +37,14 @@ The main workflow is:
 `time-entry` (a `uv run` single-file script, dep: `playwright`) is a fiscal-year
 project-time allocator + Workday automator. Commands:
 
-- `login` — open a real Chromium (headful), let the user do BNL SSO + DUO, save
-  `storage_state` to `time-entry-auth.json`.
+- `login` — log in via BNL SSO + DUO and save `storage_state` to
+  `time-entry-auth.json`.  Two modes, from `[login] mode` in the config
+  (overridable with `login --headed` / `login --headless`): **headed** opens a
+  visible Chromium for manual login; **headless** clicks through the "BNL"
+  organization picker on the tenant page, fills the SSO form from
+  `[login] username` and `password_command` (password prompted in the terminal
+  when the command is omitted) and then waits for the user to approve DUO
+  on their device.
 - `plan [YYYY-MM]` — compute & save a Hamilton/largest-remainder allocation of
   working days to projects; store in `time-entry.json`.
 - `show` / `status` — display the plan / FY-to-date totals.
@@ -59,11 +67,19 @@ project-time allocator + Workday automator. Commands:
 The top-level `--headless/--headed` option controls Chromium for `get`, `diff`,
 `apply` and `submit`; these individual commands default to headless. `workflow`
 is headed by default but accepts `--headless` for its post-login steps. `login`
-is always headed. Inspection must be invoked as `--headed apply --inspect`
-because it requires visual interaction. Headless execution has not yet been
-validated against live Workday.
+follows `[login] mode` in the config (default `headed`) and takes its own
+`--headless/--headed` override; headless login clicks the "BNL" organization
+picker on the tenant page, fills the SSO form (`_SSO_SELECTORS`, confirmed
+against the live tenant) and leaves only the DUO approval to the user.
+Inspection must be invoked as `--headed apply --inspect` because it requires
+visual interaction. Headless execution of the post-login commands has not yet
+been validated against live Workday.
 
-Config: `time-entry.toml` (projects = code/pct/desc, days_off, workday URLs).
+Config: `time-entry.toml` (projects = code/pct/desc, days_off, workday URLs,
+`[login]` mode/username/password_command). Plaintext `password` is rejected.
+The global `--password-command` overrides the configured command for login
+and workflow. Commands run without a shell; the first stdout line supplies
+the password. Command output is never included in failure messages.
 Records: `time-entry.json`. Auth: `time-entry-auth.json`.
 
 The time-entry calendar task URL: `https://www.myworkday.com/bnl/d/task/2998$10895.htmld`
@@ -126,6 +142,17 @@ how each commits (Enter? OK? per-row blur?). Use the inspect methodology below.
 ## 4. Confirmed Workday DOM reference (the gold)
 
 These are tenant- and version-sensitive (one flipped mid-session — see §5).
+
+### Login pages (headless login; confirmed working)
+- The tenant home URL first renders an **organization picker** on
+  myworkday.com itself: click the "BNL" entry (`button`/`a` with text "BNL")
+  to reach the SSO form.
+- The SSO form is matched generically in `_SSO_SELECTORS` (username by
+  name/id variants incl. ADFS, password by `type="password"`, submit button
+  or Enter).
+- After credentials, **DUO** runs its own page/iframe; a "Send push" button
+  may need a click, then the user approves on their device.  Login completion
+  is detected by the URL returning to `myworkday.com` (poll, 180 s timeout).
 
 ### Calendar page
 - Day cell: `[data-automation-id="calendarDateCell-{M}-{D}"]` where **M is
