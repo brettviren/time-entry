@@ -349,7 +349,8 @@ def test_help(xdg):
 def test_save_and_submit_selectors_are_separate():
     assert "submit" not in te._DIALOG_SELECTORS["save_button"]
     assert "review" in te._DIALOG_SELECTORS["review_button"]
-    assert "submit" in te._DIALOG_SELECTORS["submit_button"]
+    assert "popUpDialog" in te._DIALOG_SELECTORS["submit_dialog"]
+    assert "bpf-submit" in te._DIALOG_SELECTORS["submit_button"]
 
 
 def test_individual_browser_commands_default_headless_and_can_switch(
@@ -452,6 +453,232 @@ def test_headless_login_prompts_for_password(tmp_path, xdg, monkeypatch):
     ])
     assert result.exit_code == 0, result.output
     assert calls == [("jdoe", "typed-pw")]
+
+
+def test_myworkday_auth_page_is_not_a_ready_session():
+    class HiddenLocator:
+        @property
+        def first(self):
+            return self
+
+        async def is_visible(self):
+            return False
+
+        async def count(self):
+            return 0
+
+    class AuthPage:
+        url = "https://www.myworkday.com/bnl/login-saml2.htmld"
+
+        def locator(self, _selector):
+            return HiddenLocator()
+
+    assert not te.asyncio.run(te._workday_session_ready(AuthPage()))
+
+
+def test_hidden_workday_shell_marker_is_a_ready_session():
+    class ShellLocator:
+        def __init__(self, selector):
+            self.selector = selector
+
+        @property
+        def first(self):
+            return self
+
+        async def count(self):
+            return int(self.selector == te._WORKDAY_READY_SELECTORS[0])
+
+    class WorkdayPage:
+        url = "https://www.myworkday.com/bnl/d/pex/home.htmld"
+
+        def locator(self, selector):
+            return ShellLocator(selector)
+
+    assert te.asyncio.run(te._workday_session_ready(WorkdayPage()))
+
+
+def test_workday_home_title_is_a_ready_session_before_shell_renders():
+    class EmptyLocator:
+        @property
+        def first(self):
+            return self
+
+        async def count(self):
+            return 0
+
+    class WorkdayHomePage:
+        url = "https://www.myworkday.com/bnl/d/pex/home.htmld"
+
+        async def title(self):
+            return "Home - Workday"
+
+        def locator(self, _selector):
+            return EmptyLocator()
+
+    assert te.asyncio.run(te._workday_session_ready(WorkdayHomePage()))
+
+
+def test_browser_title_hides_authentication_query_values():
+    title = "Loading https://duo.example/exit?code=secret&state=also-secret"
+    assert te._safe_browser_title(title) == "Loading https://duo.example/exit"
+    assert te._safe_browser_title("Remember this device") == "Remember this device"
+
+
+def test_headless_login_skips_remember_device_before_saving_session(capsys):
+    class FakeLocator:
+        def __init__(self, page, selector):
+            self.page = page
+            self.selector = selector
+
+        @property
+        def first(self):
+            return self
+
+        async def is_visible(self):
+            if self.selector in te._WORKDAY_READY_SELECTORS:
+                return self.page.ready
+            if self.selector == self.page.skip_selector:
+                return self.page.remember_device
+            return False
+
+        async def count(self):
+            if self.selector in te._WORKDAY_READY_SELECTORS:
+                return int(self.page.ready)
+            return 0
+
+        async def click(self, timeout):
+            assert timeout == 5_000
+            self.page.clicked.append(self.selector)
+            self.page.remember_device = False
+            self.page.ready = True
+
+    class RememberDevicePage:
+        url = "https://www.myworkday.com/bnl/login-saml2.htmld"
+        ready = False
+        remember_device = True
+        skip_selector = te._WORKDAY_ACCOUNTS_SKIP_SELECTOR
+
+        def __init__(self):
+            self.clicked = []
+
+        def locator(self, selector):
+            return FakeLocator(self, selector)
+
+        async def title(self):
+            return "Remember this device - Workday Accounts"
+
+        async def wait_for_load_state(self, state, timeout):
+            assert state == "networkidle"
+            assert timeout == 10_000
+
+        async def wait_for_timeout(self, _timeout):
+            raise AssertionError("ready state should follow the Skip click")
+
+    page = RememberDevicePage()
+    assert te.asyncio.run(te._wait_for_workday_session(page, timeout_s=4))
+    assert page.clicked == [page.skip_selector]
+    assert "Remember Device?" in capsys.readouterr().out
+
+
+def test_headless_login_skips_consecutive_remember_device_pages(capsys):
+    class FakeLocator:
+        def __init__(self, page, selector):
+            self.page = page
+            self.selector = selector
+
+        @property
+        def first(self):
+            return self
+
+        async def is_visible(self):
+            expected = [
+                te._WORKDAY_ACCOUNTS_SKIP_SELECTOR,
+                te._REMEMBER_DEVICE_SKIP_SELECTORS[0],
+            ]
+            return (
+                self.page.prompt_index < 2
+                and self.selector == expected[self.page.prompt_index]
+            )
+
+        async def count(self):
+            return int(
+                self.selector in te._WORKDAY_READY_SELECTORS
+                and self.page.prompt_index == 2
+            )
+
+        async def click(self, timeout):
+            assert timeout == 5_000
+            self.page.clicks += 1
+            self.page.prompt_index += 1
+            urls = [
+                "https://www.myworkday.com/wday/authgwy/bnl/login.htmld",
+                "https://www.myworkday.com/bnl/d/pex/home.htmld",
+            ]
+            self.page.url = urls[self.page.prompt_index - 1]
+
+    class TwoPromptPage:
+        url = "https://wd1-identity.myworkday.com/prompt-0"
+        prompt_index = 0
+        clicks = 0
+
+        def locator(self, selector):
+            return FakeLocator(self, selector)
+
+        async def title(self):
+            return [
+                "Remember this device - Workday Accounts",
+                "Workday bnl",
+                "Home - Workday",
+            ][self.prompt_index]
+
+        async def wait_for_load_state(self, state, timeout):
+            assert state == "networkidle"
+            assert timeout == 10_000
+
+        async def wait_for_timeout(self, _timeout):
+            raise AssertionError("both prompts should be handled immediately")
+
+    page = TwoPromptPage()
+    assert te.asyncio.run(te._wait_for_workday_session(page, timeout_s=8))
+    assert page.clicks == 2
+    assert capsys.readouterr().out.count("Remember Device?") == 2
+
+
+def test_headless_login_recovers_when_skip_click_races_with_navigation(capsys):
+    class RacingLocator:
+        @property
+        def first(self):
+            return self
+
+        async def count(self):
+            return 0
+
+        async def is_visible(self):
+            return True
+
+        async def click(self, timeout):
+            assert timeout == 5_000
+            raise TimeoutError
+
+    class RacingPage:
+        url = "https://wd1-identity.myworkday.com/pending=trust"
+
+        def __init__(self):
+            self.waits = []
+
+        def locator(self, _selector):
+            return RacingLocator()
+
+        async def title(self):
+            return "Remember this device - Workday Accounts"
+
+        async def wait_for_timeout(self, timeout):
+            self.waits.append(timeout)
+
+    page = RacingPage()
+    assert not te.asyncio.run(te._wait_for_workday_session(page, timeout_s=2))
+    assert page.waits == [2000]
+    assert "retrying" in capsys.readouterr().out
 
 
 def test_workflow_cli_threads_headless_and_optional_month(tmp_path, xdg, monkeypatch):
@@ -626,8 +853,8 @@ def test_review_happens_before_submit():
         async def wait_for(self, **_kwargs):
             events.append(("wait", self.action))
 
-        async def click(self):
-            events.append(("click", self.action))
+        async def click(self, **kwargs):
+            events.append(("click", self.action, kwargs))
 
     class FakePage:
         def locator(self, selector):
@@ -635,6 +862,8 @@ def test_review_happens_before_submit():
                 return FakeLocator("review")
             if selector == te._DIALOG_SELECTORS["submit_button"]:
                 return FakeLocator("submit")
+            if selector == te._DIALOG_SELECTORS["submit_dialog"]:
+                return FakeLocator("submit-dialog")
             raise AssertionError(f"unexpected selector: {selector}")
 
         async def wait_for_load_state(self, state):
@@ -642,8 +871,80 @@ def test_review_happens_before_submit():
 
     te.asyncio.run(te._review_and_submit(FakePage()))
 
-    clicks = [action for event, action in events if event == "click"]
+    clicks = [event[1] for event in events if event[0] == "click"]
     assert clicks == ["review", "submit"]
+    assert ("wait", "submit-dialog") in events
+
+
+def test_submit_force_clicks_fixed_action_bar_after_normal_click_fails():
+    submit_clicks = []
+
+    class FakeLocator:
+        def __init__(self, action):
+            self.action = action
+
+        @property
+        def first(self):
+            return self
+
+        async def wait_for(self, **_kwargs):
+            return None
+
+        async def click(self, **kwargs):
+            if self.action == "submit":
+                submit_clicks.append(kwargs)
+                if not kwargs.get("force"):
+                    raise TimeoutError
+
+    class FakePage:
+        def locator(self, selector):
+            mapping = {
+                te._DIALOG_SELECTORS["review_button"]: "review",
+                te._DIALOG_SELECTORS["submit_dialog"]: "submit-dialog",
+                te._DIALOG_SELECTORS["submit_button"]: "submit",
+            }
+            return FakeLocator(mapping[selector])
+
+        async def wait_for_load_state(self, _state):
+            return None
+
+    te.asyncio.run(te._review_and_submit(FakePage()))
+    assert submit_clicks == [
+        {"timeout": 10_000},
+        {"force": True, "timeout": 5_000},
+    ]
+
+
+def test_submit_is_not_reported_successful_while_dialog_remains_open():
+    class FakeLocator:
+        def __init__(self, action):
+            self.action = action
+
+        @property
+        def first(self):
+            return self
+
+        async def wait_for(self, state, **_kwargs):
+            if self.action == "submit-dialog" and state == "hidden":
+                raise TimeoutError
+
+        async def click(self, **_kwargs):
+            return None
+
+    class FakePage:
+        def locator(self, selector):
+            mapping = {
+                te._DIALOG_SELECTORS["review_button"]: "review",
+                te._DIALOG_SELECTORS["submit_dialog"]: "submit-dialog",
+                te._DIALOG_SELECTORS["submit_button"]: "submit",
+            }
+            return FakeLocator(mapping[selector])
+
+        async def wait_for_load_state(self, _state):
+            return None
+
+    with pytest.raises(click.ClickException, match="could not be confirmed"):
+        te.asyncio.run(te._review_and_submit(FakePage()))
 
 
 def test_init_writes_config(tmp_path, xdg):

@@ -4,11 +4,12 @@ Status: the per-day `apply` flow **works end to end** (a full month was entered
 successfully). It is correct but **slow**: each day is one multi-step Workday
 dialog with mandatory settle delays, so ~21 days takes a long time.
 
-The newer `submit`, `workflow` and headless paths have automated coverage but
-**have not been tested against live Workday**. In particular, the Review and
-Submit selectors are candidates until confirmed against the tenant.  Headless
-`login` is the exception: it has been run successfully against the live tenant
-(organization picker → SSO form → DUO push).
+Headless `login` and `submit` have been run successfully against the live BNL
+tenant.  Login handles the organization picker, SSO form, DUO push and both
+post-DUO "Remember Device?" prompts before saving browser state.  Submission
+uses the confirmed Review action and the final `bpf-submit` button in the
+"Submit Time" popup.  The combined `workflow` command still has automated
+coverage only.
 
 This document is the prompt for the **next phase**: replacing the one-day-at-a-time
 entry with one of Workday's **bulk weekly** entry flows. It also records the
@@ -44,7 +45,8 @@ project-time allocator + Workday automator. Commands:
   organization picker on the tenant page, fills the SSO form from
   `[login] username` and `password_command` (password prompted in the terminal
   when the command is omitted) and then waits for the user to approve DUO
-  on their device.
+  on their device.  It skips both Workday device-trust prompts and saves state
+  only after the authenticated Workday application loads.
 - `plan [YYYY-MM]` — compute & save a Hamilton/largest-remainder allocation of
   working days to projects; store in `time-entry.json`.
 - `show` / `status` — display the plan / FY-to-date totals.
@@ -54,9 +56,10 @@ project-time allocator + Workday automator. Commands:
 - `apply [YYYY-MM] [--yes] [--inspect]` — drive Workday to enter each change.
   Dry-run unless `--yes`. `--inspect` pauses on the **first** day and dumps panel
   HTML for selector debugging. This command does not submit the timecard.
-- `submit [YYYY-MM] [--yes]` — run the unverified Workday Review → Submit flow.
-  Dry-run unless `--yes`; keep this separate from `apply` so submission is
-  explicit.
+- `submit [YYYY-MM] [--yes]` — run the Workday Review → Submit flow.  The final
+  action is scoped to the active "Submit Time" popup and success is reported
+  only after that popup closes.  Dry-run unless `--yes`; keep this separate
+  from `apply` so submission is explicit.
 - `workflow [YYYY-MM]` — run `login`, `get`, `plan` and `diff`, prompt once
   before applying, then repeat `apply` → `diff` for at most three apply
   attempts. Remaining changes after attempt three produce an error and prevent
@@ -70,10 +73,11 @@ is headed by default but accepts `--headless` for its post-login steps. `login`
 follows `[login] mode` in the config (default `headed`) and takes its own
 `--headless/--headed` override; headless login clicks the "BNL" organization
 picker on the tenant page, fills the SSO form (`_SSO_SELECTORS`, confirmed
-against the live tenant) and leaves only the DUO approval to the user.
+against the live tenant), leaves only the DUO approval to the user, skips the
+two device-trust prompts and verifies that the authenticated shell loaded.
 Inspection must be invoked as `--headed apply --inspect` because it requires
-visual interaction. Headless execution of the post-login commands has not yet
-been validated against live Workday.
+visual interaction.  Headless `submit` is also confirmed against live Workday;
+the other headless post-login commands retain their existing selector coverage.
 
 Config: `time-entry.toml` (projects = code/pct/desc, days_off, workday URLs,
 `[login]` mode/username/password_command). Plaintext `password` is rejected.
@@ -87,10 +91,9 @@ The time-entry calendar task URL: `https://www.myworkday.com/bnl/d/task/2998$108
 ### Key entry points in the code
 - `cmd_apply` → `_do_apply` (loops over changes) → `_enter_time_for_day` (the
   per-day dialog driver — this is what bulk entry would replace).
-- `cmd_submit` → `_do_submit` navigates to the month, then attempts the
-  unverified Review → Submit sequence.
-- `_DIALOG_SELECTORS` holds confirmed per-day selectors plus candidate
-  Review/Submit selectors that still require live validation.
+- `cmd_submit` → `_do_submit` navigates to the month, then runs the confirmed
+  Review → Submit sequence and verifies that the final popup closes.
+- `_DIALOG_SELECTORS` holds the confirmed per-day and Review/Submit selectors.
 - `_navigate_to_month` walks prev/next-month buttons to the target month.
 
 ---
@@ -230,6 +233,8 @@ These are tenant- and version-sensitive (one flipped mid-session — see §5).
 - `workday_dialog_filled.html` — after Time Type + Hours, before OK.
 - `workday_debug_YYYY_MM.html` — full page saved at end of `get`/`apply`.
 - `workday_submit_debug_YYYY_MM.html` — page saved after a submission attempt.
+- `workday_login_debug.html` — final login page saved when headless login times
+  out before reaching the authenticated Workday application.
 
 Then parse with quick Python: count/locate `data-automation-id`s, list
 `formLabel` texts, list `<input>`/`<button>` tags, check visibility hints. This
