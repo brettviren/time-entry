@@ -1022,6 +1022,24 @@ _SSO_SELECTORS = {
 # How long headless login waits for the user to approve DUO before giving up.
 _DUO_TIMEOUT_S = 180
 
+# A myworkday.com URL alone does not mean authentication is complete. Workday
+# hosts intermediate authentication pages there too, including the post-DUO
+# "Remember Device?" prompt. These selectors belong to the authenticated
+# Workday application shell (plus the time-entry calendar itself).
+_WORKDAY_READY_SELECTORS = [
+    '[data-automation-id="wd_header_home_icon"]',
+    '[data-automation-id="globalNavHomeItemLink"]',
+    '[data-automation-id="globalSearchInput"]',
+    '[data-automation-id="dateRangeTitle"]',
+]
+
+_REMEMBER_DEVICE_SKIP_SELECTORS = [
+    '[data-automation-id="authPanel"] '
+    '[data-automation-id="linkButton"]:has-text("Skip")',
+    '[data-automation-id="linkButton"]:has-text("Skip")',
+]
+_WORKDAY_ACCOUNTS_SKIP_SELECTOR = 'button:has-text("Skip")'
+
 
 async def _wait_first_visible(page, selectors: list[str], timeout_s: float = 10.0):
     """Like _first_visible, but gives the page a moment to render each candidate."""
@@ -1034,6 +1052,100 @@ async def _wait_first_visible(page, selectors: list[str], timeout_s: float = 10.
         except Exception:
             pass
     return None
+
+
+async def _first_currently_visible(page, selectors: list[str]):
+    """Return the first locator that is visible without waiting for each one."""
+    for sel in selectors:
+        loc = page.locator(sel).first
+        try:
+            if await loc.is_visible():
+                return loc
+        except Exception:
+            pass
+    return None
+
+
+async def _first_present(page, selectors: list[str]):
+    """Return the first locator present in the DOM, including hidden shell UI."""
+    for sel in selectors:
+        loc = page.locator(sel).first
+        try:
+            if await loc.count() > 0:
+                return loc
+        except Exception:
+            pass
+    return None
+
+
+async def _workday_session_ready(page) -> bool:
+    """Return whether the page is in the authenticated Workday application."""
+    if "myworkday.com" not in page.url:
+        return False
+    try:
+        title = await page.title()
+    except Exception:
+        title = ""
+    if "/d/" in page.url and title.endswith(" - Workday"):
+        return True
+    return await _first_present(page, _WORKDAY_READY_SELECTORS) is not None
+
+
+def _safe_browser_title(title: str) -> str:
+    """Remove transient authentication secrets from URL-like page titles."""
+    if title.startswith(("Loading http://", "Loading https://")):
+        return re.split(r"[?#]", title, maxsplit=1)[0]
+    return title
+
+
+async def _wait_for_workday_session(page, timeout_s: float) -> bool:
+    """Finish post-DUO prompts and wait for the authenticated Workday shell."""
+    attempts = max(1, int(timeout_s / 2))
+    skipped_remember_device_pages: set[tuple[str, str]] = set()
+    last_title = None
+    for attempt in range(attempts):
+        try:
+            title = _safe_browser_title(await page.title())
+        except Exception:
+            title = ""
+        if title and title != last_title:
+            print(f"[info] Browser page: {title}")
+            last_title = title
+        elif attempt and attempt % 5 == 0:
+            page_name = last_title or "untitled page"
+            print(f"[info] Still waiting for Workday ({page_name}) ...")
+
+        if await _workday_session_ready(page):
+            return True
+
+        prompt_page = (page.url, title)
+        if prompt_page not in skipped_remember_device_pages:
+            skip_selectors = _REMEMBER_DEVICE_SKIP_SELECTORS
+            if title.lower().startswith("remember this device"):
+                skip_selectors = [
+                    *skip_selectors,
+                    _WORKDAY_ACCOUNTS_SKIP_SELECTOR,
+                ]
+            skip = await _first_currently_visible(
+                page, skip_selectors
+            )
+            if skip is not None:
+                try:
+                    await skip.click(timeout=5_000)
+                except Exception:
+                    print("[warn] Could not click the device-trust Skip control; retrying.")
+                    await page.wait_for_timeout(2000)
+                    continue
+                skipped_remember_device_pages.add(prompt_page)
+                print('Skipped Workday\'s "Remember Device?" prompt.')
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=10_000)
+                except Exception:
+                    pass
+                continue
+
+        await page.wait_for_timeout(2000)
+    return False
 
 
 async def _do_login_headless(
@@ -1068,7 +1180,8 @@ async def _do_login_headless(
                 await org_loc.click()
                 await page.wait_for_load_state("networkidle")
 
-            if "myworkday.com" in page.url:
+            already_logged_in = await _workday_session_ready(page)
+            if already_logged_in:
                 print("Already logged in — no SSO form presented.")
             else:
                 user_loc = await _wait_first_visible(page, _SSO_SELECTORS["username"])
@@ -1087,29 +1200,37 @@ async def _do_login_headless(
                     await pass_loc.press("Enter")
                 print("Credentials submitted.")
 
-            # Best-effort: some DUO prompts wait for an explicit "Send push"
-            # click (possibly inside the DUO iframe) before notifying a device.
-            for frame in page.frames:
-                push = frame.locator(
-                    'button:has-text("Push"), button:has-text("Send Me a Push")')
+            if not already_logged_in:
+                # Best-effort: some DUO prompts wait for an explicit "Send push"
+                # click (possibly inside the DUO iframe) before notifying a device.
+                for frame in page.frames:
+                    push = frame.locator(
+                        'button:has-text("Push"), '
+                        'button:has-text("Send Me a Push")'
+                    )
+                    try:
+                        if await push.count() > 0:
+                            await push.first.click()
+                            print("Requested a DUO push.")
+                            break
+                    except Exception:
+                        pass
+                print("Approve the DUO request on your device; waiting for Workday ...")
+
+            if not await _wait_for_workday_session(page, _DUO_TIMEOUT_S):
+                debug_path = auth_state_path.with_name("workday_login_debug.html")
                 try:
-                    if await push.count() > 0:
-                        await push.first.click()
-                        print("Requested a DUO push.")
-                        break
+                    debug_path.write_text(await page.content(), encoding="utf-8")
+                    print(f"Login page HTML saved → {debug_path}", file=sys.stderr)
                 except Exception:
                     pass
-
-            print("Approve the DUO request on your device; waiting for Workday ...")
-            for _ in range(_DUO_TIMEOUT_S // 2):
-                await page.wait_for_timeout(2000)
-                if "myworkday.com" in page.url:
-                    break
-            else:
                 print(f"[warn] Not back at Workday after {_DUO_TIMEOUT_S}s "
                       f"(at {page.url}); session NOT saved.", file=sys.stderr)
                 return
-            await page.wait_for_load_state("networkidle")
+            try:
+                await page.wait_for_load_state("networkidle", timeout=10_000)
+            except Exception:
+                pass
             await context.storage_state(path=str(auth_state_path))
             print(f"Auth state saved → {auth_state_path}")
         finally:
@@ -1139,8 +1260,9 @@ async def _do_get(
             print(f"Navigating to {time_entry_url} ...")
             await page.goto(time_entry_url)
             await page.wait_for_load_state("networkidle")
-            # Detect session expiry: if we ended up on a non-Workday page
-            if "myworkday.com" not in page.url:
+            # Workday hosts login and post-DUO pages on myworkday.com too, so
+            # require an element from the authenticated application shell.
+            if not await _workday_session_ready(page):
                 print(f"[warn] Ended up at {page.url} — session may have expired")
                 print("Delete the auth-state file and run 'login' again.")
             else:
@@ -1184,8 +1306,12 @@ _DIALOG_SELECTORS = {
                        'button[title="Save"]:visible, button:text-is("Save"):visible',
     "review_button":   'button[data-automation-id="review"]:visible, '
                        'button[title="Review"]:visible, button:text-is("Review"):visible',
-    "submit_button":   'button[data-automation-id="submit"]:visible, '
-                       'button[title="Submit"]:visible, button:text-is("Submit"):visible',
+    # The final Submit lives in the active "Submit Time" popup. Scope it to
+    # that popup so global/login/onboarding buttons cannot be selected.
+    "submit_dialog":   '[data-automation-id="popUpDialog"]:visible',
+    "submit_button":   '[data-automation-id="popUpDialog"] '
+                       'button[data-uxi-actionbutton-action="bpf-submit"]:visible, '
+                       '[data-automation-id="popUpDialog"] button[title="Submit"]:visible',
 }
 
 
@@ -1447,7 +1573,7 @@ async def _do_apply(
             print(f"Navigating to {time_entry_url} ...")
             await page.goto(time_entry_url)
             await page.wait_for_load_state("networkidle")
-            if "myworkday.com" not in page.url:
+            if not await _workday_session_ready(page):
                 print(f"[warn] Ended up at {page.url} — session may have expired")
                 print("Delete the auth-state file and run 'login' again.")
                 return
@@ -1512,9 +1638,10 @@ async def _do_submit(
             print(f"Navigating to {time_entry_url} ...")
             await page.goto(time_entry_url)
             await page.wait_for_load_state("networkidle")
-            if "myworkday.com" not in page.url:
+            if not await _workday_session_ready(page):
                 raise click.ClickException(
-                    f"Ended up at {page.url}; the saved session may have expired. "
+                    f"Workday is not authenticated at {page.url}; "
+                    "the saved session may be incomplete or expired. "
                     "Run 'time-entry login' again."
                 )
             await _navigate_to_month(page, year, month)
@@ -1544,14 +1671,29 @@ async def _review_and_submit(page) -> None:
         pass
     print("Timecard reviewed.")
 
+    submit_dialog = page.locator(_DIALOG_SELECTORS["submit_dialog"]).first
     submit = page.locator(_DIALOG_SELECTORS["submit_button"]).first
     try:
+        await submit_dialog.wait_for(state="visible", timeout=10_000)
         await submit.wait_for(state="visible", timeout=10_000)
-        await submit.click()
+        try:
+            await submit.click(timeout=10_000)
+        except Exception:
+            # Workday's fixed action bar can occasionally be reported outside
+            # the viewport even though its button is visible and enabled.
+            await submit.click(force=True, timeout=5_000)
     except Exception as e:
         raise click.ClickException(
             "Submit button not found or could not be clicked after Review; "
             "verify the timecard manually."
+        ) from e
+
+    try:
+        await submit_dialog.wait_for(state="hidden", timeout=30_000)
+    except Exception as e:
+        raise click.ClickException(
+            "Submit was clicked, but the confirmation dialog remained open; "
+            "the timecard submission could not be confirmed."
         ) from e
     try:
         await page.wait_for_load_state("networkidle")

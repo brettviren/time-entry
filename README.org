@@ -77,8 +77,10 @@ section (the default) and overridable per run with =time-entry login
 - =headed= — opens a visible browser; you complete SSO and DUO manually.
 - =headless= — the script clicks through the "BNL" organization picker on the
   tenant page and fills the SSO form itself; you only approve the
-  DUO push on your device. Requires =username= in =[login]=. By default,
-  the password is prompted in the terminal with input hidden.
+  DUO push on your device. It skips Workday's post-DUO "Remember Device?"
+  prompt and saves the session only after the authenticated Workday shell
+  loads. Requires =username= in =[login]=. By default, the password is prompted
+  in the terminal with input hidden.
 
 To retrieve the password from a password manager, configure a command:
 
@@ -157,7 +159,7 @@ options.  Diff JSON and debug captures always use the state directory; see
 * Development notes
 
 [[file:docs/time-entry.md]] records the confirmed per-day Workday DOM selectors,
-the unverified submission selectors, SPA quirks and a roadmap for replacing the
+the submission selectors, SPA quirks and a roadmap for replacing the
 slow per-day entry dialog with Workday's bulk weekly flows.
 
 * Cautions and caveats
@@ -168,10 +170,10 @@ confirmed against BNL's tenant and drift over time.  To be most cautious, run
 landed, and only then run =submit --yes=.  Submission is never performed by
 =apply=.
 
-The new =submit=, =workflow= and headless post-login paths have automated test
-coverage but have not yet been exercised against live Workday.  Test them
-headed first, verify Workday's resulting status manually and expect selector
-adjustments.  Headless =login= has been confirmed against the live tenant.
+Headless =login= and =submit= have been exercised successfully against the live
+BNL tenant.  Workday's DOM remains version-specific, so verify the resulting
+status manually after future Workday updates.  The combined =workflow= command
+still has automated coverage only.
 
 The current policy fills in the month using 8 hour per day atoms so that it is accurate on average compared to the configured %FTE per project.  The current policy has no facility to make individual hours/days record what effort was actually done those specific hours/days.  That is, the configured %FTE per project is taken as ground truth for the month as a whole.
 
