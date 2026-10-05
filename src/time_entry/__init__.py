@@ -33,8 +33,11 @@ import shlex
 import subprocess
 import sys
 import tomllib
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
+from html.parser import HTMLParser
 from pathlib import Path
 
 import click
@@ -1703,6 +1706,259 @@ async def _review_and_submit(page) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Laboratory holidays
+# ---------------------------------------------------------------------------
+
+BNL_HOLIDAYS_URL = "https://www.bnl.gov/bnlweb/admin/holidays.php"
+
+_HOLIDAY_DATE_RE = re.compile(
+    r"(?:(?:Mon|Tues|Wednes|Thurs|Fri|Satur|Sun)day,?\s+)?"
+    r"(January|February|March|April|May|June|July|August|September|October|November|December)"
+    r"\s+(\d{1,2}),?\s+(\d{4})",
+    re.IGNORECASE,
+)
+
+
+_DAYS_OFF_KEY_RE = re.compile(r"days_off\s*=\s*\[")
+
+
+class _TableRowParser(HTMLParser):
+    """Collect the text of each table row's cells, in document order."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.rows: list[list[str]] = []
+        self._row: list[str] | None = None
+        self._cell: list[str] | None = None
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "tr":
+            self._close_row()
+            self._row = []
+        elif tag in ("td", "th") and self._row is not None:
+            self._close_cell()
+            self._cell = []
+
+    def handle_endtag(self, tag):
+        if tag in ("td", "th"):
+            self._close_cell()
+        elif tag in ("tr", "table"):
+            self._close_row()
+
+    def handle_data(self, data):
+        if self._cell is not None:
+            self._cell.append(data)
+
+    def _close_cell(self):
+        if self._cell is not None and self._row is not None:
+            self._row.append(" ".join("".join(self._cell).split()))
+        self._cell = None
+
+    def _close_row(self):
+        self._close_cell()
+        if self._row:
+            self.rows.append(self._row)
+        self._row = None
+
+    def close(self):
+        super().close()
+        self._close_row()
+
+
+def parse_holiday_date(text: str) -> date | None:
+    """Parse a date such as 'Thursday, January 1, 2026'; None if absent."""
+    m = _HOLIDAY_DATE_RE.search(text)
+    if m is None:
+        return None
+    try:
+        return datetime.strptime(f"{m[1]} {m[2]} {m[3]}", "%B %d %Y").date()
+    except ValueError:
+        return None
+
+
+def parse_bnl_holidays(html: str) -> list[tuple[date, str]]:
+    """Return sorted (date, name) pairs from the BNL holiday schedule page.
+
+    The page holds one table per calendar year (one or two years, depending
+    on the time of year).  Rather than relying on the number of tables or
+    their headers, every row with a date cell and a name cell is taken, and
+    the year comes from each date itself.
+    """
+    parser = _TableRowParser()
+    parser.feed(html)
+    parser.close()
+    found: dict[date, str] = {}
+    for row in parser.rows:
+        dates = [(i, parse_holiday_date(cell)) for i, cell in enumerate(row)]
+        dates = [(i, d) for i, d in dates if d is not None]
+        if len(dates) != 1:
+            continue
+        idx, day = dates[0]
+        name = " ".join(cell for i, cell in enumerate(row) if i != idx and cell)
+        if name:
+            found.setdefault(day, name)
+    return sorted(found.items())
+
+
+def fetch_bnl_holidays(url: str = BNL_HOLIDAYS_URL, timeout: float = 30.0) -> str:
+    """Download the holiday schedule page and return its HTML."""
+    req = urllib.request.Request(url, headers={"User-Agent": "time-entry"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            charset = resp.headers.get_content_charset() or "utf-8"
+            return resp.read().decode(charset, errors="replace")
+    except (urllib.error.URLError, TimeoutError) as exc:
+        raise click.ClickException(f"Could not fetch holidays from {url}: {exc}") from exc
+
+
+def _toml_skip(text: str, pos: int) -> int:
+    """Return the index just past the TOML string or comment starting at pos."""
+    ch = text[pos]
+    if ch == "#":
+        end = text.find("\n", pos)
+        return len(text) if end < 0 else end
+    triple = text[pos:pos + 3]
+    if triple in ('"""', "'''"):
+        end = text.find(triple, pos + 3)
+        if end < 0:
+            raise ValueError("unterminated multi-line string")
+        return end + 3
+    i = pos + 1
+    while i < len(text) and text[i] != ch:
+        if text[i] == "\n":
+            raise ValueError("unterminated string")
+        i += 2 if ch == '"' and text[i] == "\\" else 1
+    if i >= len(text):
+        raise ValueError("unterminated string")
+    return i + 1
+
+
+def _scan_top_level(text: str) -> tuple[int, tuple[int, int, int] | None]:
+    """Scan the top-level (pre-header) part of a config TOML text.
+
+    Returns the index of the first table header (or len(text)) and, if
+    days_off is set there, its (open_bracket, close_bracket, last_value_end)
+    indexes, where last_value_end is just past the final array element (or
+    open_bracket + 1 for an empty array).
+    """
+    array = None
+    i = 0
+    line_start = True
+    while i < len(text):
+        ch = text[i]
+        if ch in " \t\r":
+            i += 1
+            continue
+        if ch == "\n":
+            line_start = True
+            i += 1
+            continue
+        if ch in "#\"'":
+            i = _toml_skip(text, i)
+            line_start = False
+            continue
+        if line_start and ch == "[":
+            return i, array
+        m = _DAYS_OFF_KEY_RE.match(text, i) if line_start else None
+        if m:
+            array = _scan_array(text, m.end() - 1)
+            i = array[1] + 1
+        else:
+            i += 1
+        line_start = False
+    return len(text), array
+
+
+def _top_level_days_off(text: str) -> set[date] | None:
+    """Parse days_off from the part of the text before any table header."""
+    try:
+        top = tomllib.loads(text[:_scan_top_level(text)[0]])
+    except (tomllib.TOMLDecodeError, ValueError) as exc:
+        raise click.ClickException(f"Invalid configuration: {exc}") from exc
+    if "days_off" not in top:
+        return None
+    try:
+        return {date.fromisoformat(str(d)) for d in top["days_off"]}
+    except (TypeError, ValueError) as exc:
+        raise click.ClickException(f"Invalid days_off in configuration: {exc}") from exc
+
+
+def _scan_array(text: str, open_pos: int) -> tuple[int, int, int]:
+    depth = 0
+    last_end = open_pos + 1
+    i = open_pos
+    while i < len(text):
+        ch = text[i]
+        if ch == "#":
+            i = _toml_skip(text, i)
+            continue
+        if ch in "\"'":
+            i = _toml_skip(text, i)
+            last_end = i
+            continue
+        if ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+            if depth == 0:
+                return open_pos, i, last_end
+        elif not ch.isspace() and ch != ",":
+            last_end = i + 1
+        i += 1
+    raise ValueError("unterminated days_off array")
+
+
+def _holiday_lines(holidays: list[tuple[date, str]]) -> str:
+    return "".join(f'  "{d.isoformat()}",  # {name}\n' for d, name in holidays)
+
+
+def update_days_off_text(
+    text: str, holidays: list[tuple[date, str]]
+) -> tuple[str, list[tuple[date, str]]]:
+    """Add holidays to the days_off array of a config TOML text.
+
+    Existing entries, comments and formatting are kept verbatim; only
+    holidays not already listed are appended, each with its name as a
+    comment.  Returns the new text and the holidays that were added.
+    """
+    existing = _top_level_days_off(text)
+    added = [(d, name) for d, name in holidays if d not in (existing or set())]
+    if not added:
+        return text, []
+
+    header_pos, found = _scan_top_level(text)
+    lines = _holiday_lines(added)
+    if existing is not None and found is None:
+        raise click.ClickException(
+            "Could not locate the days_off array in the configuration."
+        )
+    if found is None:
+        block = f"days_off = [\n{lines}]\n\n"
+        if header_pos == len(text) and text and not text.endswith("\n"):
+            block = "\n" + block
+        new_text = text[:header_pos] + block + text[header_pos:]
+    else:
+        open_pos, close_pos, last_end = found
+        tail = text[last_end:close_pos]
+        comma = "" if last_end == open_pos + 1 or tail.lstrip().startswith(",") else ","
+        # Put the closing bracket on its own line, keeping its indentation.
+        line_begin = text.rfind("\n", 0, close_pos) + 1
+        if text[line_begin:close_pos].strip():
+            insert_at, prefix = close_pos, "\n"
+        else:
+            insert_at, prefix = line_begin, ""
+        new_text = (
+            text[:last_end] + comma + text[last_end:insert_at]
+            + prefix + lines + text[insert_at:]
+        )
+
+    want = (existing or set()) | {d for d, _ in added}
+    if _top_level_days_off(new_text) != want:
+        raise click.ClickException("Internal error: updated days_off does not match.")
+    return new_text, added
+
+
+# ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
 
@@ -1721,6 +1977,47 @@ def cmd_init(config_path: Path) -> None:
         sys.exit(f"Config already exists at {config_path}. Remove it first to reinitialize.")
     config_path.write_text(TEMPLATE_TOML)
     print(f"Created {config_path}\nEdit it to set your projects, percentages, and days off.")
+
+
+def cmd_holidays(
+    config_path: Path,
+    dry_run: bool,
+    url: str = BNL_HOLIDAYS_URL,
+    html_file: Path | None = None,
+    years: tuple[int, ...] = (),
+) -> None:
+    """Add the BNL laboratory holidays to days_off in the config file."""
+    if not config_path.exists():
+        raise click.ClickException(
+            f"No config at {config_path}. Run 'time-entry init' first."
+        )
+    html = html_file.read_text() if html_file else fetch_bnl_holidays(url)
+    holidays = parse_bnl_holidays(html)
+    source = html_file or url
+    if not holidays:
+        raise click.ClickException(f"No holidays found in {source}.")
+    listed = sorted({d.year for d, _ in holidays})
+    print(f"Found {len(holidays)} holidays for {', '.join(map(str, listed))} in {source}.")
+    if years:
+        missing = sorted(set(years) - set(listed))
+        if missing:
+            print(f"Warning: no holidays listed for {', '.join(map(str, missing))}.",
+                  file=sys.stderr)
+        holidays = [(d, name) for d, name in holidays if d.year in years]
+
+    text = config_path.read_text()
+    new_text, added = update_days_off_text(text, holidays)
+    added_days = {d for d, _ in added}
+    for d, name in holidays:
+        mark = "+" if d in added_days else " "
+        print(f"  {mark} {d.isoformat()} {d.strftime('%a')}  {name}")
+    if not added:
+        print(f"All holidays already in days_off in {config_path}.")
+    elif dry_run:
+        print(f"Dry run: would add {len(added)} holidays to {config_path}.")
+    else:
+        config_path.write_text(new_text)
+        print(f"Added {len(added)} holidays to days_off in {config_path}.")
 
 
 def cmd_plan(month_str: str | None, dry_run: bool, config: Config, records: Records, records_path: Path) -> None:
@@ -2146,6 +2443,24 @@ def status(ctx):
 def init_cmd(ctx):
     """Write a template config file."""
     cmd_init(ctx.obj["config_path"])
+
+
+@main.command()
+@click.option("--year", "years", type=int, multiple=True,
+              help="Only add holidays for this calendar year (repeatable; default: all listed).")
+@click.option("--url", default=BNL_HOLIDAYS_URL, show_default=True,
+              help="Holiday schedule page to read.")
+@click.option("--file", "html_file", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              help="Read a saved copy of the holiday page instead of fetching it.")
+@click.pass_context
+def holidays(ctx, years, url, html_file):
+    """Add BNL laboratory holidays to days_off in the config.
+
+    Reads the BNL holiday schedule, which lists one or two calendar years,
+    and appends any holidays not already in days_off.  Existing entries and
+    comments are kept.  Use the top-level --dry-run to preview.
+    """
+    cmd_holidays(ctx.obj["config_path"], ctx.obj["dry_run"], url, html_file, years)
 
 
 @main.command("install-browser")

@@ -131,7 +131,16 @@ current month.  Also useful:
 time-entry init          # write a template config
 time-entry show          # display a saved month
 time-entry status        # FY-to-date totals vs targets
+time-entry holidays      # add BNL laboratory holidays to days_off
 #+end_example
+
+=holidays= reads the [[https://www.bnl.gov/bnlweb/admin/holidays.php][BNL holiday schedule]], which lists the current calendar year
+and, later in the year, the next one too.  It appends every listed holiday
+missing from =days_off= in =config.toml=, with the holiday name as a comment.
+Existing entries (such as vacation days), comments, and the rest of the file
+are left untouched.  Preview with =time-entry --dry-run holidays=, restrict to
+particular years with =--year 2027= (repeatable), or read a saved copy of the
+page with =--file holidays.html=.
 
 * Files
 

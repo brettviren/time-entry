@@ -8,6 +8,7 @@ wiring, including where configuration and state are looked for.
 import json
 import shlex
 import sys
+import tomllib
 from datetime import date
 
 import pytest
@@ -1209,3 +1210,129 @@ def test_workflow_password_command_override(tmp_path, xdg, monkeypatch):
     ])
     assert result.exit_code == 0, result.output
     assert calls == ["override-helper"]
+
+
+# ---------------------------------------------------------------------------
+# Laboratory holidays
+# ---------------------------------------------------------------------------
+
+def _holiday_table(year, rows):
+    body = "".join(
+        f"<tr>\n<td style='width:50%;'>{name}</td>\n<td style='width:50%;'>{when}</td>\n</tr>\n"
+        for name, when in rows
+    )
+    return (
+        f"<table class='HolidayTable noBorders'>\n<tr>\n<th colspan='2'>{year} Holidays</th>\n"
+        f"</tr>\n{body}</table>\n"
+    )
+
+
+HOLIDAYS_2026 = _holiday_table(2026, [
+    ("New Year's Day", "Thursday, January 1, 2026"),
+    ("Juneteenth", "Friday, June 19, 2026"),
+    ("Christmas Eve (floating holiday)", "Thursday, December 24, 2026"),
+])
+HOLIDAYS_2027 = _holiday_table(2027, [
+    ("New Year&#039;s Day", "Friday, January 1, 2027"),
+    ("Juneteenth (observed)", "Friday, June 18, 2027"),
+])
+
+
+def _holidays_page(*tables):
+    return (
+        "<html><body><h1>Calendar Year 2026</h1><p>Twelve days, January 1, 2026.</p>"
+        + "".join(tables) + "</body></html>"
+    )
+
+
+def test_parse_bnl_holidays_single_year():
+    got = te.parse_bnl_holidays(_holidays_page(HOLIDAYS_2026))
+    assert got == [
+        (date(2026, 1, 1), "New Year's Day"),
+        (date(2026, 6, 19), "Juneteenth"),
+        (date(2026, 12, 24), "Christmas Eve (floating holiday)"),
+    ]
+
+
+def test_parse_bnl_holidays_two_years():
+    got = te.parse_bnl_holidays(_holidays_page(HOLIDAYS_2027, HOLIDAYS_2026))
+    assert [d for d, _ in got] == [
+        date(2026, 1, 1), date(2026, 6, 19), date(2026, 12, 24),
+        date(2027, 1, 1), date(2027, 6, 18),
+    ]
+    assert got[3][1] == "New Year's Day"
+
+
+def test_parse_bnl_holidays_none():
+    assert te.parse_bnl_holidays("<html><table><tr><td>x</td></tr></table></html>") == []
+
+
+HOLIDAYS = [(date(2026, 6, 19), "Juneteenth"), (date(2026, 7, 3), "Independence Day")]
+
+
+def test_update_days_off_appends_and_keeps_comments():
+    text = 'fiscal_year = 2026\ndays_off = [\n  "2026-07-03",  # vacation\n  "2026-08-10"  # trip\n]\n\n[[projects]]\ncode = "A"\n'
+    new, added = te.update_days_off_text(text, HOLIDAYS)
+    assert added == [(date(2026, 6, 19), "Juneteenth")]
+    assert '"2026-07-03",  # vacation\n  "2026-08-10",  # trip\n  "2026-06-19",  # Juneteenth\n]\n' in new
+    assert new.endswith('[[projects]]\ncode = "A"\n')
+
+
+@pytest.mark.parametrize("array", ['["2026-07-03"]', '[ "2026-07-03", ]', "[]", "[\n]"])
+def test_update_days_off_array_shapes(array):
+    text = f"fiscal_year = 2026\ndays_off = {array}\n[workday]\nhome_url = 'x'\n"
+    new, _ = te.update_days_off_text(text, HOLIDAYS)
+    raw = tomllib.loads(new)
+    assert set(raw["days_off"]) == {"2026-06-19", "2026-07-03"}
+    assert raw["workday"] == {"home_url": "x"}
+
+
+def test_update_days_off_inserts_missing_array_before_headers():
+    text = "fiscal_year = 2026\n\n[workday]\nhome_url = 'x'\n"
+    new, added = te.update_days_off_text(text, HOLIDAYS)
+    assert len(added) == 2
+    assert new.index("days_off") < new.index("[workday]")
+
+
+def test_update_days_off_no_change_when_present():
+    text = 'days_off = ["2026-06-19", "2026-07-03"]\n'
+    assert te.update_days_off_text(text, HOLIDAYS) == (text, [])
+
+
+def test_update_days_off_works_with_template_placeholders():
+    new, added = te.update_days_off_text(te.TEMPLATE_TOML, HOLIDAYS)
+    assert added == [(date(2026, 6, 19), "Juneteenth")]
+    assert new.count('"2026-07-03"') == 1
+    assert "pct  = XX" in new
+
+
+def test_holidays_cli_dry_run_and_apply(tmp_path, xdg):
+    page = tmp_path / "holidays.html"
+    page.write_text(_holidays_page(HOLIDAYS_2026, HOLIDAYS_2027))
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(GOOD_TOML)
+    base = ["--config", str(cfg)]
+
+    result = CliRunner().invoke(te.main, [*base, "--dry-run", "holidays", "--file", str(page)])
+    assert result.exit_code == 0, result.output
+    assert "Found 5 holidays for 2026, 2027" in result.output
+    assert cfg.read_text() == GOOD_TOML
+
+    result = CliRunner().invoke(
+        te.main, [*base, "holidays", "--file", str(page), "--year", "2027"])
+    assert result.exit_code == 0, result.output
+    config = te.load_config(cfg)
+    assert config.days_off == {date(2026, 7, 3), date(2027, 1, 1), date(2027, 6, 18)}
+
+    result = CliRunner().invoke(te.main, [*base, "holidays", "--file", str(page)])
+    assert result.exit_code == 0, result.output
+    assert len(te.load_config(cfg).days_off) == 6
+
+
+def test_holidays_cli_requires_config(tmp_path, xdg):
+    page = tmp_path / "holidays.html"
+    page.write_text(_holidays_page(HOLIDAYS_2026))
+    result = CliRunner().invoke(
+        te.main, ["--config", str(tmp_path / "none.toml"), "holidays", "--file", str(page)])
+    assert result.exit_code != 0
+    assert "time-entry init" in result.output
